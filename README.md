@@ -1,3 +1,37 @@
+# NUEVO — Planilla visual de POP en la primera solapa «📊 Resumen»
+
+La pestaña inicial ahora muestra, **antes del gráfico y las tablas anteriores**, una
+matriz tipo Excel: **un material por columna**, **foto real encima** y, debajo,
+filas separadas con **Asignado DDV**, **Remito original**, **Remito conciliado**,
+**Diferencia** y **Estado**. El identificador de la hoja y la celda del Excel
+permite rastrear el POP a su ubicación de origen.
+
+- Seleccioná Q3 o Q4 en **Período de visualización**; la matriz usa únicamente
+  los materiales de DDV correspondientes al trimestre elegido.
+- Filtrá por **hoja/familia del Excel**, **estado** o **texto** y navegá entre
+  páginas de 4, 6, 8 o 12 POP. En pantallas angostas la matriz admite desplazamiento
+  horizontal y mantiene visibles los nombres de las filas.
+- Por defecto se ven POP asignados a DDV y los que tienen registro de remito;
+  también podés activar **Incluir POP sin asignación a DDV** para inspeccionar
+  todo el catálogo de la planilla.
+- Si ya marcaste una **verificación física** en la galería, su columna se muestra
+  verde, la cantidad conciliada será la asignada y la cantidad original del
+  remito permanecerá visible para auditoría.
+- Si un POP no tiene imagen, aparece **Sin imagen de POP**. Podés incorporar esa
+  foto en la pestaña **🖼️ Galería de POP**.
+- Esta vista es **de consulta**: no duplica cifras, no modifica los resultados
+  y no requiere cambios en el repositorio de datos existente.
+
+## Actualización desde GitHub
+
+Subí **todos los archivos de este ZIP** al repositorio de la aplicación (respetá
+los directorios `.streamlit/` y `data/`). **Incluí el nuevo módulo
+`visual_summary.py`**, además de `app.py`. Hacé *Commit changes* y luego
+actualizá la aplicación en Streamlit Cloud. **No reemplaces ni borres el segundo
+repositorio privado de datos.** Los `Secrets` siguen funcionando como antes.
+
+---
+
 > **CORRECCIÓN 29/10/2026 — Error TypeError al abrir Resultados Q3**
 >
 > Si veías un error en `physical_checks.py`, línea 82, causado por una versión

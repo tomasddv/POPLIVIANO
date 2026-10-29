@@ -23,6 +23,7 @@ from persistence import make_store, read_zip_assets, write_zip_assets, StorageEr
 from physical_checks import (approve_material, undo_material, invalidate_changed_checks,
                              clear_checks, reconciled_rows, metrics, to_csv)
 from visual_match import visual_candidates, preferred_ocr_ids, choose_material, pending_ocr_indices
+from visual_summary import filter_visual_rows, render_visual_matrix
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown("""<style>
@@ -480,6 +481,47 @@ page_summary,page_ocr,page_items,page_gallery,page_history,page_labels,page_expo
     '🖼️ Galería de POP','📑 Remitos registrados','🏷️ Nombres de materiales','📥 Exportar / auditar'])
 
 with page_summary:
+    # Tabla visual, al estilo de las hojas del Excel: cada columna es un POP.
+    st.subheader(f'Planilla visual de POP · {view_period}')
+    st.caption('Cada columna representa un material del Excel de DDV: foto arriba y cantidades debajo. '
+               'La diferencia y el estado reflejan las tildes de verificación física de la galería. '
+               'El remito original nunca se modifica.')
+    sheet_options=['Todas las hojas'] + list(dict.fromkeys(r['hoja'] for r in rows))
+    matrix_col_sheet,matrix_col_status=st.columns([3,2])
+    sheet_filter=matrix_col_sheet.selectbox('Hoja / familia del Excel',sheet_options,
+                                           key=f'visual_resumen_hoja_{period_key(view_period)}')
+    status_options=['Todos','Pendientes y diferencias','Coinciden','Verificados físicamente',
+                    'Faltante','Sobrante','Pendiente']
+    status_filter=matrix_col_status.selectbox('Estado de conciliación',status_options,
+                                             key=f'visual_resumen_estado_{period_key(view_period)}')
+    matrix_col_query,matrix_col_n=st.columns([3,1])
+    search_filter=matrix_col_query.text_input('Buscar POP por marca, medida o campaña',
+                                              placeholder='Ej.: CENEFA 20X7, BRAHMA, STELLA…',
+                                              key=f'visual_resumen_buscar_{period_key(view_period)}')
+    page_size=matrix_col_n.selectbox('POP por página',[4,6,8,12],
+                                      key=f'visual_resumen_paginacion_{period_key(view_period)}')
+    show_zero=st.checkbox('Incluir POP sin asignación a DDV',value=False,
+                          key=f'visual_resumen_ceros_{period_key(view_period)}')
+    matrix_rows=filter_visual_rows(rows,p.get('aliases',{}),sheet_filter,status_filter,search_filter,show_zero)
+    total_pages=max(1,math.ceil(len(matrix_rows)/page_size))
+    matrix_page_key=f'visual_resumen_pagina_{period_key(view_period)}'
+    if st.session_state.get(matrix_page_key,1)>total_pages:
+        st.session_state[matrix_page_key]=total_pages
+    matrix_page=st.number_input('Página de materiales',min_value=1,max_value=total_pages,
+                                step=1,key=matrix_page_key)
+    active_rows=matrix_rows[(matrix_page-1)*page_size:matrix_page*page_size]
+    st.caption(f'{len(matrix_rows)} materiales encontrados · Página {matrix_page} de {total_pages} · '
+               'Desplazá horizontalmente la planilla si la pantalla es angosta.')
+    if active_rows:
+        st.markdown(render_visual_matrix(active_rows,p.get('aliases',{}),p.get('pop_images',{}),
+                                         st.session_state.pop_assets.get(view_period,{})),
+                    unsafe_allow_html=True)
+        st.caption('Asignado DDV = Excel. Remito original = lectura conservada. '
+                   'Remito conciliado = lectura o cantidad confirmada físicamente. '
+                   '— significa que todavía no existe una cantidad comprobada.')
+    else:
+        st.info('No hay materiales con esos filtros; probá otra hoja o estado.')
+    st.divider()
     st.subheader(f'Conciliación por hoja · {view_period}')
     grouped=defaultdict(lambda:{'asignado':0,'recibido':0,'coinciden':0,'diferencias':0,'pendientes':0})
     for r in rows:
