@@ -1,10 +1,10 @@
-"""Control de POP liviano — Distribuidora del Valle | GitHub + Streamlit Community Cloud.
-Iniciar: streamlit run app.py
-"""
+"""Tablero POP Liviano DDV multitrimestre | GitHub y Streamlit Community Cloud."""
 from __future__ import annotations
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path
 import json
 import re
 
@@ -12,353 +12,416 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from pop_core import catalog_from_excel, integer_quantity, metrics, reconcile, suggest_matches, to_csv
 from ocr_core import read_documents
+from pop_core import catalog_from_excel, integer_quantity, metrics, reconcile, suggest_matches, to_csv
+from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantities,
+                          new_source, restore_archive)
 
-st.set_page_config(page_title='POP Liviano | DDV',page_icon='📦',layout='wide',initial_sidebar_state='expanded')
+st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown('''<style>
-.stApp {background:#F4F7FC}
-h1,h2,h3 {letter-spacing:-.025em;color:#142B4C}
-[data-testid="stMetric"] {background:white;border:1px solid #E1E8F2;border-radius:13px;padding:15px 19px}
-[data-testid="stMetricLabel"]{font-weight:600;color:#536781}
-[data-testid="stMetricValue"]{color:#183A68}
+.stApp{background:#F4F7FC}
+h1,h2,h3{letter-spacing:-.025em;color:#142B4C}
+[data-testid="stMetric"]{background:#fff;border:1px solid #DDE5F0;border-radius:13px;padding:13px 18px}
+[data-testid="stMetricLabel"]{color:#536781;font-weight:600}
+[data-testid="stMetricValue"]{color:#153962}
 [data-testid="stSidebar"]{background:#13263F}
 [data-testid="stSidebar"] *{color:#EAF1F8}
 [data-testid="stSidebar"] button{color:#18304D}
 [data-testid="stSidebar"] input{color:#18304D!important}
-.stTabs [data-baseweb="tab"]{padding:9px 16px}
+.stTabs [data-baseweb="tab"]{padding:9px 15px}
 div.stButton > button[kind="primary"]{background:#1769D2;border-radius:9px}
 </style>''',unsafe_allow_html=True)
 
 
-def count_fmt(n): return f'{int(n):,}'.replace(',','.')
+def pretty(value):
+    return f'{int(value):,}'.replace(',','.')
 
 
-def reset_source(content):
-    digest=sha256(content).hexdigest()
-    if st.session_state.get('source_digest')!=digest:
-        catalog,issues,sheets=catalog_from_excel(content)
-        st.session_state.update(source_digest=digest,catalog=catalog,issues=issues,sheets=sheets,
-            remito_entries={},ocr_rows=[],ocr_raw='',ocr_previews=[],ocr_warnings=[],
-            ocr_version=0,ocr_edit_ver=0,ocr_edited_rows=None,edit_version=0,aliases={},unmatched=[],is_complete=False,
-            remito_signature=None,checked_source=False)
-    return digest
+def period_key(label):
+    return label.replace(' ','_')
 
 
-def rows_dataframe(items):
-    return pd.DataFrame(items)
+def labels_for(catalog,aliases):
+    return {c['id']:f"{c['id']} | {aliases.get(c['id']) or c['material']} [{c['celda']}]"
+            for c in catalog}
 
 
-def reviewed_ocr_to_items(items):
-    additions=defaultdict(int);unmatched=[];accepted=0
-    for r in items:
+def now_label():
+    return datetime.now().strftime('%d/%m/%Y %H:%M')
+
+
+def make_ocr_table(p, names):
+    if p.get('ocr_edited_rows') is not None:
+        return p['ocr_edited_rows']
+    return [
+        {'Página':x.get('pagina',''), 'Cantidad':x.get('cantidad'),
+         'Descripción OCR':x.get('detalle',''),
+         'Material Excel':names.get(x.get('id',''),'(sin asignar)'),
+         'Sugerencia':names.get(x.get('sugerido',''),'—'),
+         'Lectura':x.get('estado_match',''), 'Ignorar':False}
+        for x in p['ocr_rows']
+    ]
+
+
+def confirm_ocr_rows(edited, catalog_ids):
+    amounts=defaultdict(int);unknown=[];count=0
+    for r in edited:
         if bool(r.get('Ignorar',False)):continue
-        selected=str(r.get('Material Excel','') or '')
-        qty=integer_quantity(r.get('Cantidad'))
-        ident=selected.split(' | ',1)[0] if ' | ' in selected else ''
-        if ident in valid_ids and qty is not None:
-            additions[ident]+=qty;accepted+=1
+        option=str(r.get('Material Excel','') or '')
+        identity=option.split(' | ',1)[0] if ' | ' in option else ''
+        n=integer_quantity(r.get('Cantidad'))
+        if identity in catalog_ids and n is not None:
+            amounts[identity]+=n;count+=1
         else:
-            unmatched.append({'pagina':r.get('Página',''),'cantidad':qty,'detalle':r.get('Descripción OCR',''),
-                'sugerencia':r.get('Sugerencia',''), 'motivo':'Cantidad sin verificar' if qty is None else 'Sin material asociado'})
-    return dict(additions),unmatched,accepted
+            unknown.append({'Página':r.get('Página',''), 'Cantidad':n,
+                'Descripción':r.get('Descripción OCR',''),
+                'Motivo':'Cantidad sin verificar' if n is None else 'Material sin asignar'})
+    return dict(amounts),unknown,count
 
 
-def options_for_catalog(catalog,aliases):
-    names={}
-    for c in catalog:
-        extra=aliases.get(c['id'],'').strip()
-        label=(extra if extra else c['material'])
-        names[c['id']]=f"{c['id']} | {label} [{c['celda']}]"
-    return names
+def initialize():
+    if 'pop_periods' not in st.session_state:
+        baseline=json.loads((Path(__file__).resolve().parent/'data'/'q3_2026_preliminar.json').read_text(encoding='utf-8'))
+        q3=empty_period();q3.update(baseline)
+        st.session_state.pop_periods={'Q3 2026':q3,'Q4 2026':empty_period()}
+    # Cambios de selector deben aplicarse antes de crear los widgets de ese rerun.
+    if st.session_state.get('next_period_load') in st.session_state.pop_periods:
+        st.session_state.period_load=st.session_state.pop('next_period_load')
+    if st.session_state.get('next_period_view') in st.session_state.pop_periods:
+        st.session_state.period_view=st.session_state.pop('next_period_view')
+    if 'period_load' not in st.session_state or st.session_state.period_load not in st.session_state.pop_periods:
+        st.session_state.period_load='Q4 2026'
+    if 'period_view' not in st.session_state or st.session_state.period_view not in st.session_state.pop_periods:
+        st.session_state.period_view='Q3 2026'
 
 
+initialize()
+periods=st.session_state.pop_periods
 st.title('📦 Control de POP liviano')
-st.caption('Conciliación trimestral de remitos · Exclusivamente Distribuidora del Valle S.A.')
+st.caption('Remitos vs. asignación de POP · Solo Distribuidora del Valle S.A. · Resultados separados por trimestre')
 
 with st.sidebar:
-    st.markdown('### POP · DDV')
-    st.caption('Control de recepción por material y por pestaña')
-    period=st.text_input('Trimestre / período',value='Q4 2026',help='Ej.: GS Q4 2026')
-    uploaded_excel=st.file_uploader('1. Excel de asignaciones (.xlsx)',type=['xlsx'],help='Se utiliza la fila de Distribuidora del Valle S.A. en cada hoja, también las ocultas.')
-    uploaded_remito=st.file_uploader('2. Remito: fotos o PDF (1 a 3 páginas)',type=['png','jpg','jpeg','webp','pdf'],accept_multiple_files=True)
-    two_col=st.checkbox('Remito con 2 columnas de materiales',value=True)
-    split=st.slider('Separación de las dos columnas (%)',42,58,50,1,disabled=not two_col,
-                    help='Si una cantidad queda cortada en la foto, mové el separador y volvé a leer.')/100
-    include_hidden=st.checkbox('Incluir hojas ocultas del Excel',value=True)
+    st.markdown('### Control DDV')
+    st.caption('Cada período guarda su propio Excel, OCR y conciliación dentro de esta sesión.')
+    periods_ordered=sorted(periods,key=lambda s:(int(s.split()[1]),int(s[1])))
+    load_period=st.selectbox('📥 Período de carga',periods_ordered,key='period_load')
+    view_period=st.selectbox('📊 Período de visualización',periods_ordered,key='period_view')
+    with st.expander('Crear otro trimestre',expanded=False):
+        label=st.text_input('Nuevo período (ej. Q1 2027)',placeholder='Q1 2027',key='new_period_label').strip().upper()
+        if st.button('Agregar período',use_container_width=True):
+            if not PERIOD_RE.fullmatch(label):st.error('Formato requerido: Q1 2027, Q2 2027, etc.')
+            elif label in periods:st.warning('El período ya existe.')
+            else:
+                periods[label]=empty_period()
+                st.session_state.next_period_load=label
+                st.session_state.next_period_view=label
+                st.rerun()
     st.divider()
-    st.caption('El OCR funciona en el servidor, sin servicios externos de reconocimiento. Ningún resultado se considera definitivo sin revisión.')
-
-if uploaded_excel is None:
-    st.info('**Empezá subiendo el Excel de asignación Q4 y las imágenes del remito en la barra lateral.** Luego presioná «Leer e interpretar remito».')
-    a,b,c=st.columns(3)
-    a.markdown('**1 · Cargar**\n\nExcel Q4 + hasta 3 fotos / páginas del remito.')
-    b.markdown('**2 · Revisar**\n\nOCR de cantidades, sugerencias de materiales y correcciones.')
-    c.markdown('**3 · Comparar**\n\nCoincidencias, faltantes, sobrantes y exportación del control.')
-    st.stop()
-
-try: raw_excel=uploaded_excel.getvalue();digest=reset_source(raw_excel)
-except Exception as e:
-    st.error(f'No pude leer el Excel: {e}');st.stop()
-catalog=st.session_state['catalog'];meta=st.session_state['sheets'];issues=st.session_state['issues']
-valid_ids={c['id'] for c in catalog};aliases=st.session_state['aliases']
-if not catalog:
-    st.error('El Excel no contiene cantidades identificadas en la fila «Distribuidora del Valle S.A.». Consultá la hoja de auditoría y verificá que sea el archivo de asignación.');
-    with st.expander('Alertas de lectura de Excel',expanded=True):
-        for item in issues:st.write('•',item)
-    st.stop()
-
-names=options_for_catalog(catalog,aliases)
-selection_options=['(sin asignar)']+list(names.values())
-
-with st.sidebar:
-    st.success(f'{len(catalog)} columnas de POP detectadas en {len([m for m in meta if m["fila_ddv"] is not None])} hojas con DDV.')
-    if uploaded_remito:
-        total_photos=sum(1 for f in uploaded_remito if f.name.lower().endswith(('.png','.jpg','.jpeg','.webp')))
-        if total_photos>3:st.warning('Se analizarán como máximo tres páginas.')
-    if st.button('🔍 Leer e interpretar remito',type='primary',use_container_width=True,disabled=not uploaded_remito):
-        signature=sha256(''.join(f.name+sha256(f.getvalue()).hexdigest() for f in uploaded_remito).encode()).hexdigest()
+    uploading=periods[load_period]
+    st.markdown(f'**Carga de {load_period}**')
+    if uploading['catalog']:
+        assigned=sum(int(c['cantidad_excel']) for c in uploading['catalog'])
+        st.success(f'{len(uploading["catalog"])} materiales de DDV · {pretty(assigned)} unidades asignadas')
+        st.caption(f'Excel: {uploading["source_name"]}')
+    else:st.warning('Todavía no se cargó el Excel de este período.')
+    uploaded_excel=st.file_uploader('1. Subir o reemplazar Excel de asignación',type=['xlsx'],key=f'xl_{period_key(load_period)}')
+    if st.button('Aplicar Excel a este período',disabled=uploaded_excel is None,use_container_width=True):
         try:
-            with st.spinner('Extrayendo texto y cantidades de todas las páginas…'):
-                files=[(f.name,f.getvalue()) for f in uploaded_remito]
-                result=read_documents(files,two_columns=two_col,split=split,max_pages=3)
-                suggestions=suggest_matches(result.rows,catalog,aliases)
-            st.session_state['ocr_rows']=suggestions
-            st.session_state['ocr_edited_rows']=None
-            st.session_state['ocr_edit_ver']=0
-            st.session_state['ocr_previews']=result.images
-            st.session_state['ocr_raw']=result.raw_text
-            st.session_state['ocr_warnings']=result.warnings
-            st.session_state['ocr_version']+=1
-            st.session_state['remito_signature']=signature
-            st.session_state['unmatched']=[]
-            st.session_state['is_complete']=False
-            st.session_state['remito_entries']={}
-            st.success(f'{len(suggestions)} renglones de materiales identificados. Revisalos antes de aplicarlos.')
-        except Exception as ex: st.error(f'Error en reconocimiento: {ex}')
-
-rows=reconcile(catalog,st.session_state['remito_entries'],st.session_state['is_complete'],include_hidden)
-summary=metrics(rows)
-unmatched=st.session_state['unmatched']
-a,b,c,d,e=st.columns(5)
-a.metric('Asignado DDV',count_fmt(summary['asignado']))
-b.metric('Declarado en remito',count_fmt(summary['recibido']))
-c.metric('Coinciden',summary['coinciden'])
-d.metric('Diferencias',summary['diferencias'])
-e.metric('Pendientes',summary['pendientes'])
-
-if st.session_state['is_complete']:
-    st.success('Remito marcado como completamente revisado. Los materiales asignados que no figuren se contabilizan como faltantes.')
-elif st.session_state['remito_entries']:
-    st.warning('**Conciliación preliminar:** todavía no se confirmó la revisión completa del remito. Las asignaciones sin lectura se muestran como pendientes, no como faltantes.')
-else:
-    st.info('Aún no hay cantidades confirmadas del remito. Hacé la lectura OCR y revisá las asignaciones detectadas.')
-if unmatched:st.error(f'Hay {len(unmatched)} renglones del remito sin conciliar. Revisalos en «Lectura OCR».')
-
-page1,page2,page3,page4,page5=st.tabs(['📷 Lectura OCR','📊 Resumen','🧾 Control por material','🏷️ Identificar materiales','📥 Exportar y auditar'])
-
-with page1:
-    st.subheader('Lectura e interpretación de remitos')
-    st.caption('El OCR reconoce texto y cantidades, pero puede errar cuando la imagen está borrosa, inclinada o contiene números pequeños. Las coincidencias automáticas son sugerencias que siempre se revisan.')
-    if st.session_state['ocr_warnings']:
-        for warn in st.session_state['ocr_warnings']:st.warning(warn)
-    ocr=st.session_state['ocr_rows']
-    if not ocr:
-        st.info('Subí uno o más archivos en el panel izquierdo y hacé clic en «Leer e interpretar remito».')
-    else:
-        num_qty=sum(r.get('cantidad') is not None for r in ocr)
-        num_suggest=sum(bool(r.get('sugerido')) for r in ocr)
-        aa,bb,cc=st.columns(3)
-        aa.metric('Renglones OCR',len(ocr))
-        bb.metric('Con cantidad',num_qty)
-        cc.metric('Con sugerencia',num_suggest)
-        st.markdown('**Paso de revisión:** corregí las cantidades, elegí el material Excel para cada línea y marcá «Ignorar» solo en líneas que no correspondan a POP.')
-        preview=[]
-        for item in ocr:
-            candidate=item.get('id','')
-            preview.append({'Página':item['pagina'], 'Cantidad':item['cantidad'],
-                            'Descripción OCR':item['detalle'],
-                            'Material Excel':names.get(candidate,'(sin asignar)'),
-                            'Sugerencia':names.get(item.get('sugerido',''),'—'),
-                            'Lectura':item.get('estado_match',''), 'Ignorar':False})
-        if st.session_state.get('ocr_edited_rows') is not None:
-            preview=st.session_state['ocr_edited_rows']
-        with st.form(key=f'review_ocr_{st.session_state["ocr_version"]}_{st.session_state["ocr_edit_ver"]}'):
-            modified=st.data_editor(pd.DataFrame(preview),hide_index=True,use_container_width=True,num_rows='dynamic',height=530,
-                column_order=['Página','Cantidad','Descripción OCR','Material Excel','Sugerencia','Lectura','Ignorar'],
-                column_config={
-                    'Página':st.column_config.TextColumn('Página',width='medium'),
-                    'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d',help='En blanco significa cantidad no reconocida'),
-                    'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
-                    'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=selection_options,required=False,width='large'),
-                    'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
-                    'Lectura':st.column_config.TextColumn('Lectura',width='small'),
-                    'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False),
-                },disabled=['Página','Sugerencia','Lectura'])
-            submitted=st.form_submit_button('✅ Aplicar lectura revisada a la conciliación',type='primary',use_container_width=True)
-        if submitted:
-            items=modified.to_dict('records')
-            st.session_state['ocr_edited_rows']=items
-            st.session_state['ocr_edit_ver']+=1
-            qty,unresolved,accepted=reviewed_ocr_to_items(items)
-            st.session_state['remito_entries']=qty
-            st.session_state['unmatched']=unresolved
-            st.session_state['is_complete']=False
-            st.session_state['edit_version']+=1
-            st.toast(f'{accepted} líneas aplicadas. {len(unresolved)} por resolver.')
+            binary=uploaded_excel.getvalue()
+            digest=sha256(binary).hexdigest()
+            if uploading['source_digest']==digest:
+                st.info('Es el mismo Excel que ya está cargado; se conservaron las cantidades del remito.')
+            else:
+                periods[load_period]=new_source(uploading,binary,uploaded_excel.name,catalog_from_excel)
+                st.session_state.next_period_view=load_period
+                st.success('Excel actualizado. Se reiniciaron SOLO las lecturas de este trimestre.')
+                st.rerun()
+        except Exception as ex:st.error(f'No se pudo aplicar el archivo Excel: {ex}')
+    remito=st.file_uploader('2. Fotos del remito o PDF (hasta 3 páginas)',type=['png','jpg','jpeg','webp','pdf'],
+                            accept_multiple_files=True,key=f'remito_{period_key(load_period)}')
+    treatment=st.radio('Qué hacer con la nueva lectura',
+        ['Reemplazar cantidades anteriores','Agregar páginas al remito actual'],
+        key=f'operation_{period_key(load_period)}',
+        help='Reemplazar: el nuevo remito sustituye las cantidades anteriores cuando confirmes el OCR. Agregar: suma cantidades, solo si son páginas diferentes del MISMO remito.')
+    two_columns=st.checkbox('El remito tiene dos columnas',value=True,key=f'columns_{period_key(load_period)}')
+    split=st.slider('Separación de columnas (%)',42,58,50,disabled=not two_columns,key=f'split_{period_key(load_period)}')/100
+    if treatment=='Agregar páginas al remito actual':
+        st.warning('No vuelvas a subir páginas ya contabilizadas: se sumarían dos veces.')
+    run_ocr=st.button('🔎 Leer remito para este período',type='primary',use_container_width=True,
+                      disabled=not remito or not uploading['catalog'])
+    if run_ocr:
+        try:
+            files=[(x.name,x.getvalue()) for x in remito]
+            signature=sha256(b'|'.join(x.encode()+b':'+sha256(data).hexdigest().encode() for x,data in files)).hexdigest()
+            if treatment=='Agregar páginas al remito actual' and signature in uploading['processed_signatures']:
+                st.error('Estas páginas ya fueron procesadas para este período. No se permite sumarlas dos veces.')
+            else:
+                with st.spinner(f'Leyendo páginas de {load_period}…'):
+                    result=read_documents(files,two_columns=two_columns,split=split,max_pages=3)
+                    suggestions=suggest_matches(result.rows,uploading['catalog'],uploading['aliases'])
+                uploading.update(ocr_rows=suggestions,ocr_raw=result.raw_text,ocr_warnings=result.warnings,
+                    ocr_previews=result.images,ocr_edited_rows=None,ocr_edit_ver=0,
+                    ocr_version=uploading['ocr_version']+1,ocr_signature=signature,
+                    ocr_operation=treatment,ocr_base_entries=deepcopy(uploading['remito_entries']),
+                    remito_files=[name for name,_ in files])
+                st.session_state.next_period_view=load_period
+                st.success(f'{len(suggestions)} renglones reconocidos. Revisalos en la pestaña OCR antes de aplicarlos.')
+                st.rerun()
+        except Exception as ex:st.error(f'Error en el OCR: {ex}')
+    st.divider()
+    st.markdown('**Historial de períodos**')
+    history=[]
+    for label in periods_ordered:
+        entry=periods[label]
+        registered=len(entry['remito_entries'])
+        if entry['catalog']:
+            status='Revisado' if entry['is_complete'] else ('Provisional' if registered else 'Sin remito')
+        else:status='Sin Excel'
+        history.append({'Período':label,'Estado':status,'Materiales':registered})
+    st.dataframe(pd.DataFrame(history),hide_index=True,use_container_width=True)
+    st.download_button('💾 Descargar historial Q3 / Q4 (JSON)',archive_bytes(periods),
+        file_name='POP_DDV_historial_todos_los_periodos.json',mime='application/json',use_container_width=True)
+    history_upload=st.file_uploader('Restaurar historial guardado',type=['json'],key='restore_all')
+    if st.button('Restaurar historial',disabled=history_upload is None,use_container_width=True):
+        try:
+            restored=restore_archive(history_upload.getvalue())
+            if not restored:raise ValueError('El archivo no contiene períodos.')
+            # Los períodos faltantes en el respaldo se conservan; los presentes se reemplazan.
+            periods.update(restored)
+            if st.session_state.period_load not in periods:st.session_state.period_load=next(iter(periods))
+            if st.session_state.period_view not in periods:st.session_state.period_view=next(iter(periods))
+            st.success('Historial recuperado correctamente.')
             st.rerun()
-        if unmatched:
-            st.markdown('**Líneas sin conciliar (no cuentan como recibidas)**')
-            st.dataframe(pd.DataFrame(unmatched),hide_index=True,use_container_width=True)
-        if st.session_state['ocr_previews']:
-            with st.expander('Ver fotografías originales de las páginas',expanded=False):
-                for caption,photo in st.session_state['ocr_previews']:
-                    st.image(photo,caption=caption,use_container_width=False,width=600)
-        with st.expander('Consultar la transcripción OCR íntegra',expanded=False):
-            st.text_area('Texto detectado',st.session_state['ocr_raw'],height=320)
-            st.download_button('Descargar transcripción OCR',st.session_state['ocr_raw'].encode('utf-8'),file_name='POP_DDV_transcripcion_OCR.txt')
+        except Exception as ex:st.error(f'No se pudo restaurar el historial: {ex}')
+    st.caption('En Streamlit Cloud el historial no persiste automáticamente tras cerrar o reiniciar la app. Guardá el JSON y restauralo al volver.')
 
-with page2:
-    st.subheader('Conciliación por pestaña del Excel')
-    st.caption(f'Período {period} · Filtro exclusivo DDV · {"Incluye" if include_hidden else "Excluye"} hojas ocultas')
-    group=defaultdict(lambda:{'asignado':0,'recibido':0,'diferencias':0,'pendientes':0})
+st.markdown(f'### Resultados · {view_period}')
+if load_period!=view_period:
+    st.info(f'Estás **cargando en {load_period}** y **consultando {view_period}**. Las operaciones de carga no modifican el período que estás viendo.')
+
+p=periods[view_period]
+catalog=p['catalog']
+if not catalog:
+    st.warning(f'No hay Excel cargado para {view_period}. Seleccionalo como «Período de carga» y subí su archivo.')
+    st.stop()
+
+include_hidden=st.checkbox('Incluir hojas ocultas del Excel',value=True,key=f'hidden_{period_key(view_period)}')
+rows=reconcile(catalog,p['remito_entries'],p['is_complete'],include_hidden)
+summary=metrics(rows)
+cols=st.columns(5)
+for col,name,value in zip(cols,['Asignado DDV','Remito registrado','Coinciden','Diferencias','Pendientes'],
+                          [pretty(summary['asignado']),pretty(summary['recibido']),summary['coinciden'],summary['diferencias'],summary['pendientes']]):
+    col.metric(name,value)
+if p['preliminary']:
+    if p['source_mode']=='Q3 2026 precargado':
+        st.warning('**Q3 precargado · cifras provisionales:** la transcripción anterior de la foto no fue certificada. Podés reemplazarla subiendo nuevas fotos en «Período de carga: Q3 2026».')
+    else:
+        st.warning('**Control preliminar:** las cantidades fueron cargadas, pero falta confirmar la revisión completa del remito.')
+if p['ocr_rows'] and p['ocr_signature'] not in p['processed_signatures']:
+    st.info('Hay una lectura OCR nueva **pendiente de revisión y aplicación** para este período; las cifras de arriba todavía corresponden al control anterior.')
+if p['is_complete']:
+    st.success('Remito marcado como completamente revisado; los materiales sin registro pasan a contabilizarse como faltantes.')
+elif p['remito_entries']:
+    st.caption('Conciliación preliminar: un material no leído aparece pendiente, no como recibido en cero.')
+else:
+    st.info('Faltan cantidades del remito. Seleccioná este período para cargar sus fotos o PDF.')
+if p['unmatched']:
+    st.error(f'Hay {len(p["unmatched"])} líneas OCR no conciliadas. Revisalas antes de cerrar el remito.')
+
+names=labels_for(catalog,p['aliases'])
+valid_ids=set(names)
+options=['(sin asignar)']+list(names.values())
+
+page_summary,page_ocr,page_items,page_labels,page_export=st.tabs([
+    '📊 Resumen','📷 Lectura OCR','🧾 Control por material','🏷️ Nombres de materiales','📥 Exportar / auditar'])
+
+with page_summary:
+    st.subheader(f'Conciliación por hoja · {view_period}')
+    grouped=defaultdict(lambda:{'asignado':0,'recibido':0,'coinciden':0,'diferencias':0,'pendientes':0})
     for r in rows:
-        g=group[r['hoja']];g['asignado']+=r['cantidad_excel'];g['recibido']+=r['cantidad_remito'] or 0
+        g=grouped[r['hoja']]
+        g['asignado']+=r['cantidad_excel']
+        g['recibido']+=r['cantidad_remito'] or 0
+        g['coinciden']+=int(r['estado']=='Coincide')
         g['diferencias']+=int(r['estado'] in ('Faltante','Sobrante'))
         g['pendientes']+=int(r['estado']=='Pendiente')
-    chosen=sorted([(k,v) for k,v in group.items() if v['asignado'] or v['recibido']],key=lambda i:i[1]['asignado'],reverse=True)
-    if chosen:
-        fig=go.Figure()
-        for name,key,color in [('Asignado','asignado','#2575C7'),('Remito validado','recibido','#E8A248')]:
-            fig.add_trace(go.Bar(name=name,x=[v[key] for _,v in chosen],y=[k for k,_ in chosen],orientation='h',marker_color=color))
-        fig.update_layout(barmode='group',height=max(330,38*len(chosen)+100),margin=dict(l=12,r=10,t=5,b=15),
-            legend=dict(orientation='h',y=1.07),xaxis=dict(title='Unidades',gridcolor='#E7EDF4'),
-            yaxis=dict(autorange='reversed'),plot_bgcolor='#FFFFFF',paper_bgcolor='#FFFFFF')
-        st.plotly_chart(fig,use_container_width=True,config={'displayModeBar':False})
-    if summary['diferencias']:
-        x,y=st.columns(2);x.metric('Unidades faltantes',count_fmt(summary['faltan_unidades']))
-        y.metric('Unidades sobrantes',count_fmt(summary['sobran_unidades']))
+    ordered=sorted([(key,val) for key,val in grouped.items() if val['asignado'] or val['recibido']],
+                   key=lambda e:e[1]['asignado'],reverse=True)
+    if ordered:
+        chart=go.Figure()
+        for title,key,color in [('Excel asignado','asignado','#266FBA'),('Remito registrado','recibido','#E6A144')]:
+            chart.add_trace(go.Bar(name=title,x=[x[key] for _,x in ordered],y=[label for label,_ in ordered],
+                                   marker_color=color,orientation='h'))
+        chart.update_layout(barmode='group',height=max(350,40*len(ordered)+110),
+                            margin=dict(l=10,r=8,t=6,b=18),legend=dict(orientation='h',y=1.07),
+                            plot_bgcolor='#fff',paper_bgcolor='#fff',yaxis=dict(autorange='reversed'),
+                            xaxis=dict(title='Unidades',gridcolor='#E7EDF4'))
+        st.plotly_chart(chart,use_container_width=True,config={'displayModeBar':False})
+    cc,dd=st.columns(2)
+    cc.metric('Unidades faltantes registradas',pretty(summary['faltan_unidades']))
+    dd.metric('Unidades sobrantes registradas',pretty(summary['sobran_unidades']))
+    attention=[r for r in rows if r['estado'] in ('Pendiente','Faltante','Sobrante')]
     st.markdown('**Materiales que requieren atención**')
-    attentions=[r for r in rows if r['estado'] in ('Pendiente','Faltante','Sobrante')]
-    if attentions:
-        st.dataframe(pd.DataFrame([{'Estado':r['estado'],'Hoja':r['hoja'],'Material':r['material'],
-            'Excel':r['cantidad_excel'],'Remito':r['cantidad_remito'],'Diferencia':r['diferencia'], 'Celda':r['celda']}
-            for r in sorted(attentions,key=lambda r:(0 if r['estado']!='Pendiente' else 1,-r['cantidad_excel']))]),
-            hide_index=True,use_container_width=True,height=min(500,40*len(attentions)+50))
-    else:st.success('Sin diferencias ni materiales pendientes en el alcance seleccionado.')
-    st.markdown('**Resumen por hoja**')
-    st.dataframe(pd.DataFrame([{'Hoja':k,'Asignado':v['asignado'],'Remito':v['recibido'],
-        'Diferencias':v['diferencias'],'Pendientes':v['pendientes']} for k,v in group.items()]),
-        hide_index=True,use_container_width=True)
+    if attention:
+        st.dataframe(pd.DataFrame([{'Estado':r['estado'],'Hoja':r['hoja'],'Material':p['aliases'].get(r['id']) or r['material'],
+            'Excel':r['cantidad_excel'],'Remito':r['cantidad_remito'],'Diferencia':r['diferencia'],'Celda':r['celda']}
+            for r in sorted(attention,key=lambda r:(r['estado']=='Pendiente',-r['cantidad_excel']))]),
+            hide_index=True,use_container_width=True,height=min(550,40*len(attention)+50))
+    else:st.success('No hay diferencias ni renglones pendientes en el alcance seleccionado.')
+    st.markdown('**Resultado por pestaña del Excel**')
+    st.dataframe(pd.DataFrame([{'Hoja':label,'Asignado':g['asignado'],'Remito':g['recibido'],
+        'Coinciden':g['coinciden'],'Diferencias':g['diferencias'],'Pendientes':g['pendientes']}
+        for label,g in grouped.items()]),hide_index=True,use_container_width=True)
+    other=[(key,item) for key,item in periods.items() if key!=view_period and item['catalog']]
+    if other:
+        with st.expander('Comparar indicadores con otros trimestres',expanded=False):
+            compare=[]
+            for label,item in [(view_period,p)]+other:
+                report=metrics(reconcile(item['catalog'],item['remito_entries'],item['is_complete'],include_hidden))
+                compare.append({'Período':label,'Asignado':report['asignado'],'Remito registrado':report['recibido'],
+                    'Coinciden':report['coinciden'],'Diferencias':report['diferencias'],
+                    'Pendientes':report['pendientes'],
+                    'Control':'Revisado' if item['is_complete'] else 'Provisional'})
+            st.dataframe(pd.DataFrame(compare),hide_index=True,use_container_width=True)
 
-with page3:
-    st.subheader('Control editable por material')
-    st.caption('Podés ingresar o corregir cantidades manualmente. **Blanco = sin verificar**. **0 = confirmado como no recibido**.')
-    c1,c2,c3=st.columns([2,2,1])
-    with c1:sheet_filter=st.selectbox('Pestaña', ['Todas']+sorted(set(r['hoja'] for r in rows)))
-    with c2:status_filter=st.selectbox('Estado',['Todos','Diferencias y pendientes','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'])
-    with c3:include_empty=st.checkbox('Ver ceros de Excel',False)
-    displayed=[r for r in rows if (sheet_filter=='Todas' or r['hoja']==sheet_filter)
-            and (include_empty or r['cantidad_excel']>0 or r['verificado'])
-            and (status_filter=='Todos' or (r['estado'] in ('Faltante','Sobrante','Pendiente') if status_filter=='Diferencias y pendientes' else r['estado']==status_filter))]
-    data=[{'ID':r['id'],'Hoja':r['hoja'],'Material':aliases.get(r['id']) or r['material'],
-         'Celda':r['celda'],'Asignado':r['cantidad_excel'],
-         'Recibido':st.session_state['remito_entries'].get(r['id']),
-         'Diferencia':r['diferencia'],'Estado':r['estado']} for r in displayed]
-    apply_manual=False
-    if not data:
-        st.info('No hay materiales para los filtros seleccionados.')
+with page_ocr:
+    st.subheader(f'Leer y revisar fotos · {view_period}')
+    st.caption('Cargá las imágenes del período desde el panel izquierdo. Las coincidencias automáticas son propuestas, no validaciones definitivas.')
+    for warning in p['ocr_warnings']:st.warning(warning)
+    if not p['ocr_rows']:
+        st.info('Este trimestre no tiene una extracción OCR editable. Podés subir una imagen nueva y ejecutar «Leer remito para este período».')
     else:
-        with st.form(key=f'edit_manual_{st.session_state["edit_version"]}_{sheet_filter}_{status_filter}_{include_empty}'):
-            edited=st.data_editor(pd.DataFrame(data),use_container_width=True,hide_index=True,num_rows='fixed',height=560,
+        ocr=p['ocr_rows']
+        q1,q2,q3=st.columns(3)
+        q1.metric('Renglones OCR',len(ocr));q2.metric('Con cantidad',sum(x.get('cantidad') is not None for x in ocr))
+        q3.metric('Con propuesta',sum(bool(x.get('sugerido')) for x in ocr))
+        st.caption(f'Acción seleccionada para esta lectura: **{p["ocr_operation"]}**. Reaplicar la misma tabla no suma dos veces los materiales.')
+        st.markdown('Corregí las cifras y elegí el material correcto. Si el OCR confundió dos conceptos, dejalos pendientes hasta identificarlos.')
+        table=make_ocr_table(p,names)
+        with st.form(f'ocr_form_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}'):
+            edited=st.data_editor(pd.DataFrame(table),use_container_width=True,hide_index=True,
+                height=525,num_rows='dynamic',
+                column_order=['Página','Cantidad','Descripción OCR','Material Excel','Sugerencia','Lectura','Ignorar'],
+                column_config={
+                    'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d'),
+                    'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
+                    'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=options,width='large'),
+                    'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
+                    'Página':st.column_config.TextColumn('Página',width='medium'),
+                    'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False)},
+                disabled=['Página','Sugerencia','Lectura'])
+            submitted=st.form_submit_button('✅ Aplicar revisión a este período',type='primary',use_container_width=True)
+        if submitted:
+            edited_rows=edited.to_dict('records')
+            quantities,unknown,count=confirm_ocr_rows(edited_rows,valid_ids)
+            p['ocr_edited_rows']=edited_rows
+            p['ocr_edit_ver']+=1
+            p['remito_entries']=merge_quantities(p['ocr_base_entries'],quantities,p['ocr_operation'])
+            p['unmatched']=unknown
+            p['is_complete']=False
+            p['preliminary']=True
+            p['edit_version']+=1
+            if p['ocr_signature'] not in p['processed_signatures']:
+                p['processed_signatures'].append(p['ocr_signature'])
+            p['last_updated']=now_label()
+            st.toast(f'{count} líneas aplicadas a {view_period}. Pendientes: {len(unknown)}.')
+            st.rerun()
+        if p['unmatched']:
+            st.markdown('**Renglones sin conciliar**')
+            st.dataframe(pd.DataFrame(p['unmatched']),hide_index=True,use_container_width=True)
+        if p.get('ocr_previews'):
+            with st.expander('Ver fotografías originales de este lote',expanded=False):
+                for label,img in p['ocr_previews']:
+                    st.image(img,caption=label,width=650)
+        with st.expander('Transcripción completa del OCR'):
+            st.text_area('Texto detectado',value=p['ocr_raw'],height=280)
+            st.download_button('Descargar texto OCR',p['ocr_raw'].encode(),file_name=f'POP_DDV_{period_key(view_period)}_ocr.txt')
+
+with page_items:
+    st.subheader(f'Control editable por material · {view_period}')
+    st.caption('Blanco significa material no verificado; 0 significa cero unidades recibidas, comprobado.')
+    col1,col2,col3=st.columns([2,2,1])
+    sheet=col1.selectbox('Hoja del Excel',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'filter_sheet_{period_key(view_period)}')
+    status=col2.selectbox('Estado',['Todos','Diferencias y pendientes','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'filter_status_{period_key(view_period)}')
+    show_zero=col3.checkbox('Ver ceros Excel',value=False,key=f'filter_zero_{period_key(view_period)}')
+    display=[r for r in rows if (sheet=='Todas' or r['hoja']==sheet)
+             and (show_zero or r['cantidad_excel']>0 or r['verificado'])
+             and (status=='Todos' or (r['estado'] in ('Faltante','Sobrante','Pendiente')
+                 if status=='Diferencias y pendientes' else r['estado']==status))]
+    manual=[{'ID':r['id'],'Hoja':r['hoja'],'Material':p['aliases'].get(r['id']) or r['material'],
+             'Celda':r['celda'],'Excel':r['cantidad_excel'],
+             'Remito':p['remito_entries'].get(r['id']),
+             'Diferencia':r['diferencia'],'Estado':r['estado']} for r in display]
+    if not manual:st.info('No hay materiales para estos filtros.')
+    else:
+        with st.form(f'form_manual_{period_key(view_period)}_{p["edit_version"]}_{sheet}_{status}_{show_zero}'):
+            manual_edit=st.data_editor(pd.DataFrame(manual),hide_index=True,use_container_width=True,
+                height=530,num_rows='fixed',
                 column_config={'ID':None,'Material':st.column_config.TextColumn('Material',width='large'),
-                    'Recibido':st.column_config.NumberColumn('Recibido',format='%d',min_value=0,step=1),
-                    'Asignado':st.column_config.NumberColumn('Asignado',format='%d')},
-                disabled=['ID','Hoja','Material','Celda','Asignado','Diferencia','Estado'])
-            apply_manual=st.form_submit_button('Guardar correcciones manuales',type='primary')
-    if apply_manual:
-        update=dict(st.session_state['remito_entries'])
-        for r in edited.to_dict('records'):
-            qty=integer_quantity(r['Recibido'])
-            if qty is None:update.pop(r['ID'],None)
-            else:update[r['ID']]=qty
-        st.session_state['remito_entries']=update
-        st.session_state['edit_version']+=1
-        st.session_state['is_complete']=False
-        st.rerun()
+                    'Excel':st.column_config.NumberColumn('Excel',format='%d'),
+                    'Remito':st.column_config.NumberColumn('Remito',min_value=0,step=1,format='%d')},
+                disabled=['ID','Hoja','Material','Celda','Excel','Diferencia','Estado'])
+            manual_save=st.form_submit_button('Guardar correcciones de este trimestre',type='primary')
+        if manual_save:
+            update=dict(p['remito_entries'])
+            for obj in manual_edit.to_dict('records'):
+                amount=integer_quantity(obj['Remito'])
+                if amount is None:update.pop(obj['ID'],None)
+                else:update[obj['ID']]=amount
+            p['remito_entries']=update;p['edit_version']+=1
+            p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label()
+            st.rerun()
     st.divider()
-    cannot_finish=bool(unmatched) or not st.session_state['remito_entries']
-    if cannot_finish:
-        st.caption('Para cerrar la revisión debe existir al menos una cantidad confirmada y no puede quedar ninguna línea OCR sin asociar o ignorar.')
-    # Una marca explícita evita convertir silenciosamente líneas borrosas en faltantes.
-    new_complete=st.checkbox('✅ Confirmo que revisé TODAS las páginas del remito y las cantidades del control',
-                  value=st.session_state['is_complete'],disabled=cannot_finish)
-    if new_complete!=st.session_state['is_complete']:
-        st.session_state['is_complete']=new_complete;st.rerun()
-    if st.button('Borrar todas las cantidades cargadas'):
-        st.session_state['remito_entries']={};st.session_state['unmatched']=[]
-        st.session_state['is_complete']=False;st.session_state['edit_version']+=1;st.rerun()
+    blocked=bool(p['unmatched']) or not p['remito_entries']
+    if not p['is_complete']:
+        st.caption('Para cerrar el remito debe haber cantidades registradas, no quedar renglones OCR sin resolver y haberse revisado físicamente TODAS sus páginas.')
+        if st.button('✅ Marcar remito completamente revisado',disabled=blocked,key=f'finish_{period_key(view_period)}'):
+            p['is_complete']=True;p['preliminary']=False;p['last_updated']=now_label();st.rerun()
+    else:
+        if st.button('Reabrir revisión del remito',key=f'reopen_{period_key(view_period)}'):
+            p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label();st.rerun()
+    with st.expander('Reiniciar cantidades de este trimestre'):
+        st.warning('Esta acción borra solo las cantidades de remito de este período. No modifica los otros trimestres ni las asignaciones del Excel.')
+        if st.button(f'Borrar cantidades de {view_period}',key=f'clear_{period_key(view_period)}'):
+            p['remito_entries']={};p['unmatched']=[];p['is_complete']=False;p['preliminary']=False
+            p['edit_version']+=1;p['last_updated']=now_label();st.rerun()
 
-with page4:
-    st.subheader('Identificar materiales ambiguos del Excel')
-    st.caption('Algunas columnas se llaman únicamente «20x30» o «7x3,5», pero representan campañas distintas. Escribí un nombre más específico para mejorar las próximas sugerencias OCR. No modifica el Excel.')
-    alias_upload=st.file_uploader('Importar nombres guardados de este mismo archivo (JSON)',type=['json'],key='alias_import')
-    if st.button('Importar nombres',disabled=alias_upload is None):
-        try:
-            data=json.loads(alias_upload.getvalue())
-            if data.get('source_digest')!=digest:st.error('Este diccionario pertenece a un Excel diferente. No se importó.')
-            else:
-                st.session_state['aliases']={k:str(v) for k,v in data.get('aliases',{}).items() if k in valid_ids}
-                st.rerun()
-        except Exception as ex:st.error(f'JSON inválido: {ex}')
-    with st.form('aliases_form'):
-        alias_rows=[{'ID':c['id'],'Hoja':c['hoja'],'Etiqueta original':c['material'],
-                     'Nombre específico (opcional)':aliases.get(c['id'],'')} for c in catalog if c['cantidad_excel']>0]
-        aliased=st.data_editor(pd.DataFrame(alias_rows),hide_index=True,use_container_width=True,
-            height=430,num_rows='fixed',disabled=['ID','Hoja','Etiqueta original'],
-            column_config={'Etiqueta original':st.column_config.TextColumn('Etiqueta original',width='large'),
-                           'Nombre específico (opcional)':st.column_config.TextColumn('Nombre específico (opcional)',width='large')})
-        save_alias=st.form_submit_button('Guardar nombres personalizados')
-    if save_alias:
-        st.session_state['aliases']={r['ID']:str(r['Nombre específico (opcional)']).strip()
-                     for r in aliased.to_dict('records') if str(r['Nombre específico (opcional)']).strip() not in ('','nan','None')}
-        st.success('Nombres actualizados. Volvé a interpretar el remito para recalcular sugerencias.')
-    st.download_button('Descargar diccionario de nombres (JSON)',
-        json.dumps({'source_digest':digest,'aliases':st.session_state['aliases']},ensure_ascii=False,indent=2).encode('utf-8'),
-        file_name=f'POP_DDV_diccionario_{re.sub(r"[^A-Za-z0-9-]","_",period)}.json',mime='application/json')
+with page_labels:
+    st.subheader(f'Identificación de materiales · {view_period}')
+    st.caption('Si una columna del Excel dice solo «20x30», podés agregar el nombre específico de la campaña. Esto no modifica el archivo Excel.')
+    labels=[{'ID':c['id'],'Hoja':c['hoja'],'Original':c['material'],
+             'Descripción personalizada':p['aliases'].get(c['id'],'')}
+             for c in catalog if c['cantidad_excel']>0]
+    with st.form(f'alias_form_{period_key(view_period)}_{p["edit_version"]}'):
+        aliases_data=st.data_editor(pd.DataFrame(labels),hide_index=True,use_container_width=True,
+            height=475,num_rows='fixed',column_config={
+                'Original':st.column_config.TextColumn('Original',width='large'),
+                'Descripción personalizada':st.column_config.TextColumn('Descripción personalizada',width='large')},
+                disabled=['ID','Hoja','Original'])
+        update_names=st.form_submit_button('Guardar nombres para este trimestre')
+    if update_names:
+        p['aliases']={r['ID']:str(r['Descripción personalizada']).strip()
+                      for r in aliases_data.to_dict('records')
+                      if str(r['Descripción personalizada']).strip() not in ('','nan','None')}
+        p['last_updated']=now_label();p['edit_version']+=1;st.rerun()
 
-with page5:
-    st.subheader('Exportación y trazabilidad')
-    st.download_button('⬇️ Descargar conciliación CSV (Excel)',to_csv(rows),
-        file_name=f'POP_DDV_{re.sub(r"[^A-Za-z0-9-]","_",period)}_conciliacion.csv',
-        mime='text/csv',type='primary')
-    backup={'version':1,'periodo':period,'fecha_exportacion':datetime.now().isoformat(timespec='seconds'),
-        'source_digest':digest,'archivo_excel':uploaded_excel.name,
-        'remito_completo':st.session_state['is_complete'],'cantidades':st.session_state['remito_entries'],
-        'aliases':st.session_state['aliases'],'unmatched':st.session_state['unmatched']}
-    st.download_button('💾 Guardar avance como JSON (para continuar otro día)',
-        json.dumps(backup,ensure_ascii=False,indent=2).encode('utf-8'),
-        file_name=f'POP_DDV_{re.sub(r"[^A-Za-z0-9-]","_",period)}_respaldo.json',mime='application/json')
-    backup_upload=st.file_uploader('Restaurar avance previamente guardado (JSON)',type=['json'],key='backup_upload')
-    if st.button('Restaurar avance',disabled=backup_upload is None):
-        try:
-            data=json.loads(backup_upload.getvalue())
-            if data.get('source_digest')!=digest:st.error('El respaldo pertenece a otro Excel. Subí el Excel correspondiente antes de restaurarlo.')
-            else:
-                st.session_state['remito_entries']={k:v for k,v in data.get('cantidades',{}).items() if k in valid_ids}
-                st.session_state['aliases']={k:v for k,v in data.get('aliases',{}).items() if k in valid_ids}
-                st.session_state['unmatched']=data.get('unmatched',[])
-                st.session_state['is_complete']=bool(data.get('remito_completo',False))
-                st.session_state['edit_version']+=1;st.rerun()
-        except Exception as ex:st.error(f'No fue posible abrir ese respaldo: {ex}')
-    st.markdown('**Hojas inspeccionadas (incluidas las ocultas)**')
-    st.dataframe(pd.DataFrame([{'Hoja':m['hoja'],'Oculta':('Sí' if m['oculta'] else 'No'),
-            'Fila DDV':m['fila_ddv'],'Columnas POP':m['materiales'],'Unidades DDV':m['total'],
-            'Fila cabeceras':m['cabecera']} for m in meta]),hide_index=True,use_container_width=True)
-    if issues:
-        st.markdown('**Observaciones de lectura del Excel**')
-        for issue in issues:st.caption('• '+issue)
-    st.caption('Seguridad: en Streamlit Community Cloud, la sesión y sus datos no son un archivo histórico persistente. Descargá el respaldo JSON. No subas datos sensibles a una app pública sin controles de acceso.')
+with page_export:
+    st.subheader(f'Descargas y auditoría · {view_period}')
+    st.download_button('⬇️ Descargar conciliación CSV de este período',to_csv(rows),
+        file_name=f'POP_DDV_{period_key(view_period)}_conciliacion.csv',mime='text/csv',type='primary')
+    st.download_button('💾 Descargar historial completo en JSON',archive_bytes(periods),
+        file_name='POP_DDV_historial_todos_los_periodos.json',mime='application/json')
+    st.markdown(f'''**Origen Excel:** {p['source_name']}  
+**Estado:** {'Revisión completa' if p['is_complete'] else 'Provisional o incompleto'}  
+**Última modificación:** {p['last_updated'] or 'No registrada'}''')
+    st.markdown('**Hojas del Excel inspeccionadas**')
+    st.dataframe(pd.DataFrame([{'Hoja':r['hoja'],'Oculta': 'Sí' if r['oculta'] else 'No',
+        'Fila DDV':r['fila_ddv'],'Columnas POP':r['materiales'],'Unidades DDV':r['total']}
+        for r in p['sheets']]),hide_index=True,use_container_width=True)
+    if p['issues']:
+        st.markdown('**Alertas de lectura Excel**')
+        for issue in p['issues']:st.caption('• '+str(issue))
+    st.info('Los datos del remito se procesan en el servidor. Los respaldos JSON conservan resultados y correcciones, pero NO contienen las fotografías ni los Excel completos. Si el hosting reinicia, restaurá el JSON.')
 
 st.divider()
-st.caption('POP liviano · DDV · Carga nueva cada trimestre · El remito declara cantidades; la conformidad física requiere verificación del depósito.')
+st.caption('POP liviano · DDV · Cada trimestre es independiente. Nunca se considera una cifra OCR como recepción física certificada sin revisión.')

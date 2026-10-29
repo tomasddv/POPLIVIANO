@@ -1,58 +1,62 @@
-# Control POP liviano — Distribuidora del Valle
+# Control de POP liviano · Distribuidora del Valle (DDV)
 
-Tablero web en **Streamlit**, apto para desplegar desde **GitHub** en Streamlit Community Cloud. Se creó para **Q4 2026**, pero se puede reutilizar con los Excel de asignación de próximos trimestres. **El repositorio no incluye archivos empresariales ni el remito Q3**.
+Aplicación para **GitHub + Streamlit Community Cloud**, con **Q3 2026 precargado** y **Q4 2026** listo para cargar. Cada período tiene Excel, fotografías, lectura OCR, correcciones y resultados completamente separados.
 
-## Qué hace
+## Funcionalidad principal
 
-1. Permite cargar el **Excel de asignación Q4** (`.xlsx`) con varias hojas, incluso ocultas.
-2. Busca únicamente la fila **Distribuidora del Valle S.A.** en cada hoja y extrae cantidades por material/columna. No toma cifras de otros distribuidores.
-3. Permite subir **1 a 3 fotografías** (`JPG`, `PNG`, `WEBP`) o un **PDF** de remito (hasta 3 páginas totales).
-4. Lee las imágenes con **Tesseract OCR instalado en el servidor**. Separa las dos columnas de los remitos GS y detecta cantidades/descripciones.
-5. Sugiere correspondencias entre texto del remito y columnas del Excel. Como ciertos productos se parecen entre sí y los OCR pueden equivocarse, **el usuario verifica cantidades y asignaciones**. Las ambiguas quedan sin asignar.
-6. Calcula **Coincide / Faltante / Sobrante / Pendiente**, presenta gráficos por hoja, permite ingresar cantidades manualmente y exporta CSV.
-7. Descarga un **respaldo JSON** de cada trimestre y un **diccionario JSON** para nombrar materiales que en el Excel solo figuran por medidas.
+- Dos selectores independientes: **Período de carga** y **Período de visualización**. Elegir Q3 para cargar fotos no borra ni altera Q4.
+- **Q3 2026 listo al abrir:** catálogo real de 100 columnas DDV, 95.590 unidades asignadas y 93.750 unidades transcriptas provisoriamente del remito anterior (70 coincidencias, 1 diferencia, 3 pendientes). **No están certificadas**: la foto era de lectura difícil.
+- En Q3, podés **subir una imagen nueva** del remito y elegir **Reemplazar cantidades anteriores**. Después se revisa la tabla OCR y se aplica a Q3.
+- Si el documento viene en páginas distintas, podés **Agregar páginas al remito actual**. Solo debe usarse para páginas no contabilizadas. La misma carga no se suma dos veces por accidente.
+- **Q4 2026:** elegí Q4 en «Período de carga», aplicá el Excel nuevo y luego el remito Q4 (foto o PDF, hasta 3 páginas por lectura).
+- Comparación de cada material con la fila **Distribuidora del Valle S.A.**, en **todas las hojas, incluidas ocultas**, sin mezclar los totales de las demás distribuidoras.
+- Tabla de materiales por pestaña y estado (Coincide, Faltante, Sobrante, Pendiente), gráficos, cambios manuales, nombres personalizados, exportación CSV.
+- Podés agregar nuevos trimestres, por ejemplo Q1 2027, desde el lateral.
+- **Historial JSON global:** descarga todas las asignaciones extraídas, cantidades OCR aplicadas, nombres y estados de Q3 y Q4; permite restaurarlos en sesiones futuras, incluso sin volver a subir los Excel. No contiene las fotos ni los Excel originales.
 
-### Importante sobre la lectura automática
+## Publicar o actualizar en GitHub
 
-El OCR **no es infalible**. El tablero no puede garantizar que el número detectado en una foto sea el número real, especialmente en remitos borrosos. Solo toma como datos revisados las cantidades que apliques desde la tabla de OCR. El archivo de origen debe contener la fila de DDV. La falta de una asignación en un renglón se trata como *pendiente*, no como entrega cero, hasta que se confirme el remito completo.
+1. Abrí tu repositorio de GitHub que contiene la versión anterior del tablero POP. Si todavía no existe, creá uno **privado**.
+2. **Reemplazá o subí los archivos de este ZIP**, respetando subcarpetas: `app.py`, `pop_core.py`, `ocr_core.py`, `period_store.py`, `requirements.txt`, `packages.txt`, `.streamlit/config.toml` y `data/q3_2026_preliminar.json`.
+3. Hacé *Commit changes* en la rama que usás para publicar, generalmente `main`.
+4. Si ya tenías la app creada en <https://share.streamlit.io/>, se redepliega con el cambio. Si no, creá una app con **`app.py`** como archivo de inicio.
+5. Streamlit Cloud instala automáticamente Tesseract por `packages.txt` para leer las imágenes. No necesitás contratar API de visión.
 
-Las columnas de Excel en que los encabezados son genéricos (por ejemplo `20x30`) pueden necesitar identificación manual. Los nombres personalizados ayudan a futuras lecturas del mismo Excel.
+**No subir el Excel original ni las fotos al repositorio.** El proyecto **sí incluye una extracción de DDV de Q3** como `data/q3_2026_preliminar.json`, porque pediste ver Q3 de entrada. Esta extracción contiene cantidades y descripciones comerciales internas: por eso, **mantener el repositorio privado** y verificar quién puede acceder a la aplicación.
 
-## Publicarlo con GitHub y Streamlit Community Cloud
+## Uso diario
 
-1. Creá un repositorio nuevo en **GitHub** (recomendado privado si tiene referencias empresariales) y subí los archivos de esta carpeta **respetando las subcarpetas**.
-2. En <https://share.streamlit.io/> ingresá con GitHub y elegí **Create app / Deploy**.
-3. Seleccioná el repositorio, rama `main` y archivo principal **`app.py`**.
-4. Elegí **Deploy**. Streamlit instala las dependencias en `requirements.txt` y Tesseract mediante `packages.txt`.
-5. Abrí el enlace de tu aplicación. Cargá el Excel **GS Q4** y las imágenes del remito **Q4**, y pulsá **Leer e interpretar remito**.
-6. Revisá y aplicá cada línea del OCR; filtrá diferencias, comprobá los materiales, descargá el CSV y guardá un respaldo JSON.
+1. Seleccioná **Q3 2026** o **Q4 2026** en «Período de carga».
+2. Subí el Excel, si ese período todavía no tiene uno. En Q3 ya hay catálogo precargado, por lo que podés omitirlo.
+3. Subí las fotos o PDF del remito. Elegí **Reemplazar** o **Agregar páginas**, según corresponda.
+4. Presioná **Leer remito para este período**.
+5. En la pestaña **Lectura OCR**, corregí cualquier cifra errónea y asigná cada material. Luego presioná **Aplicar revisión a este período**.
+6. Elegí el período que te interese en «Período de visualización». Revisá el resumen y las diferencias por material/hoja.
+7. Confirmá el remito completo solo cuando hayas verificado todas sus páginas. Descargá el CSV y el **historial JSON**.
 
-**GitHub Pages por sí solo no ejecuta Python ni OCR.** GitHub aloja el código y Streamlit Cloud ejecuta el tablero. No hace falta una clave API ni pagar un servicio de IA; el OCR corre localmente dentro del servidor de Streamlit.
+## Persistencia y límites
 
-## Ejecutar en Windows
+Streamlit Community Cloud **no es almacenamiento permanente**. Los cambios viven en la sesión: al cerrar, cambiar de navegador o reiniciar el servidor puede perderse el avance. Al terminar cada sesión, usá **Descargar historial Q3 / Q4 (JSON)** y la próxima vez **Restaurar historial guardado**. El catálogo inicial Q3 siempre aparece precargado incluso sin restaurar, pero tus cambios posteriores a Q3 deben restaurarse desde JSON.
 
-Instalá Python 3.11+, [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) con idiomas `spa` y `eng`, y ejecutá:
+El OCR de fotos borrosas puede confundir cantidades. Ni un match sugerido ni una cifra OCR constituyen un control de recepción validado. Un material sin lectura permanece como **pendiente**, no se marca cero automáticamente. Si cerrás el remito completo, los materiales no registrados se consideran faltantes.
+
+## Ejecutar localmente
 
 ```bash
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-En Windows agregá Tesseract al `PATH`; si no aparece, agregá la ruta de `tesseract.exe` en la configuración de tu entorno.
+Requiere Python 3.11 o superior y Tesseract instalado con `spa` y `eng` para OCR local. `packages.txt` se encarga de esto al publicar en Streamlit Cloud.
 
-## Privacidad, uso de nube y persistencia
+## Estructura del proyecto
 
-- No se utiliza OCR externo ni se envían archivos a un proveedor de IA; se procesan dentro de la sesión del servidor.
-- No guardes archivos Excel, fotos de remito, CSV ni respaldos dentro del repositorio. `.gitignore` impide incorporarlos accidentalmente con `git add` en una carpeta de trabajo normal.
-- Una app pública podría ser utilizada por otras personas. Configurá controles de acceso si la información es privada.
-- El avance está en memoria de la sesión, **no** en una base de datos; ante reinicios puede perderse. Descargá el **respaldo JSON** al terminar y restauralo con el mismo Excel.
-
-## Archivos
-
-- `app.py`: aplicación interactiva.
-- `pop_core.py`: lectura de Excel, similitudes entre materiales, conciliación y exportación.
-- `ocr_core.py`: procesamiento de fotografías y PDF mediante Tesseract.
-- `requirements.txt`: dependencias de Python.
-- `packages.txt`: Tesseract y sus idiomas para desplegar en Linux.
-- `.streamlit/config.toml`: tema y tamaño de archivos.
-- `tests/test_core.py`: pruebas unitarias de lógica de matching y conciliación.
+| Archivo | Uso |
+| --- | --- |
+| `app.py` | Tablero multitrimestre con carga y visualización independientes |
+| `pop_core.py` | Extracción DDV de Excel, comparación por material y CSV |
+| `ocr_core.py` | OCR Tesseract para fotos/PDF |
+| `period_store.py` | Estado por período, consolidación y backup/restore JSON |
+| `data/q3_2026_preliminar.json` | Catálogo DDV real y remito preliminar Q3; sin fotos |
+| `requirements.txt`, `packages.txt` | Dependencias para Streamlit Community Cloud |
+| `tests/` | Pruebas de conciliación, integridad del Q3 y aislamiento Q3/Q4 |
