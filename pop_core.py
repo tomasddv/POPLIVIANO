@@ -234,20 +234,32 @@ def suggest_matches(ocr_rows, catalog, aliases=None):
     return match(ocr_rows,catalog,aliases)
 
 
-def reconcile(catalog, quantities, completed=False,include_hidden=True):
+def reconcile(catalog, quantities, completed=False,include_hidden=True, physical_checks=None):
     rows=[]
+    checks=physical_checks or {}
     for c in catalog:
         if c['oculta'] and not include_hidden:continue
         qty=quantities.get(c['id'])
         expected=c['cantidad_excel']
-        received=integer_quantity(qty) if qty is not None else (0 if completed else None)
+        original=integer_quantity(qty) if qty is not None else (0 if completed else None)
+        verified=c['id'] in checks
+        if original is None:previous_status='Pendiente' if expected>0 else 'Sin movimiento'
+        elif original==expected:previous_status='Coincide'
+        elif original<expected:previous_status='Faltante'
+        else:previous_status='Sobrante'
+        # El valor del remito bruto queda intacto. La conciliación visible
+        # refleja el recuento físico aprobado y es reversible.
+        received=expected if verified else original
         delta=received-expected if received is not None else None
         if received is None:status='Pendiente' if expected>0 else 'Sin movimiento'
         elif delta==0:status='Coincide'
         elif delta<0:status='Faltante'
         else:status='Sobrante'
-        rows.append({**c,'cantidad_remito':received,'diferencia':delta,'estado':status,
-                     'verificado':c['id'] in quantities})
+        rows.append({**c,'cantidad_remito':received,'cantidad_remito_original':original,
+                     'diferencia':delta,'estado':status,'estado_original':previous_status,
+                     'verificacion_fisica':verified,
+                     'fecha_verificacion':checks.get(c['id'],{}).get('fecha'),
+                     'verificado':c['id'] in quantities or verified})
     return rows
 
 
@@ -257,12 +269,14 @@ def metrics(rows):
             'coinciden':sum(r['estado']=='Coincide' for r in rows),
             'diferencias':sum(r['estado'] in ('Faltante','Sobrante') for r in rows),
             'pendientes':sum(r['estado']=='Pendiente' for r in rows),
+            'verificados_fisicos':sum(bool(r.get('verificacion_fisica')) for r in rows),
+            'remito_original':sum(r.get('cantidad_remito_original') or 0 for r in rows),
             'faltan_unidades':sum(-r['diferencia'] for r in rows if r['diferencia'] is not None and r['diferencia']<0),
             'sobran_unidades':sum(r['diferencia'] for r in rows if r['diferencia'] is not None and r['diferencia']>0)}
 
 
 def to_csv(rows):
-    f=StringIO();cols=['hoja','grupo','formato','material','celda','cantidad_excel','cantidad_remito','diferencia','estado','verificado','oculta']
+    f=StringIO();cols=['hoja','grupo','formato','material','celda','cantidad_excel','cantidad_remito_original','cantidad_remito','diferencia','estado','estado_original','verificacion_fisica','fecha_verificacion','verificado','oculta']
     writer=csv.DictWriter(f,fieldnames=cols,delimiter=';',extrasaction='ignore')
     writer.writeheader();writer.writerows(rows)
     return ('\ufeff'+f.getvalue()).encode('utf-8')

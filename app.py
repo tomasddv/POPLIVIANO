@@ -20,27 +20,45 @@ from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantiti
                           new_source, restore_archive)
 from media_core import extract_pop_images, make_scan_previews, image_jpeg
 from persistence import make_store, read_zip_assets, write_zip_assets, StorageError
+from physical_checks import (approve_material, undo_material, invalidate_changed_checks,
+                             clear_checks, reconciled_rows)
+from visual_match import visual_candidates, preferred_ocr_ids, choose_material
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown("""<style>
-/* Paleta clara y legible, también en la barra lateral y en widgets BaseWeb. */
-.stApp, [data-testid="stAppViewContainer"]{background-color:#F4F7FC;color:#172A42}
-[data-testid="stSidebar"]{background-color:#FFFFFF;border-right:1px solid #DEE6EF}
-[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3,[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] label,[data-testid="stSidebar"] small,
-[data-testid="stSidebar"] .stCaption{color:#172A42}
-h1,h2,h3{letter-spacing:-.025em;color:#142B4C}
-[data-testid="stMetric"]{background:#FFFFFF;border:1px solid #DDE5F0;border-radius:13px;padding:13px 18px}
-[data-testid="stMetricLabel"]{color:#536781;font-weight:600}
-[data-testid="stMetricValue"]{color:#153962}
-.stTabs [data-baseweb="tab"]{padding:9px 15px}
-[data-testid="stDataFrame"], [data-testid="stDataEditor"]{background:#FFFFFF}
-.stButton > button[kind="primary"],button[data-testid="stBaseButton-primary"]{
- background:#1769D2;color:#FFFFFF;border-radius:9px;border-color:#1769D2}
-.stButton > button[kind="primary"]:hover,button[data-testid="stBaseButton-primary"]:hover{
- background:#1057B4;color:#FFFFFF}
-/* No usar selectores globales * que heredaban blanco en cuadros blancos. */
+/* Tema accesible: TODOS los textos negros, incluso mensajes, botones,
+   menús BaseWeb, formularios, métricas, barra lateral y tablas. */
+html, body, .stApp, [data-testid="stAppViewContainer"],
+[data-testid="stSidebar"] {background-color:#F4F7FC !important; color:#000 !important;}
+[data-testid="stSidebar"] {background-color:#FFFFFF !important; border-right:1px solid #CBD5E1;}
+.stApp *, [data-testid="stSidebar"] *,
+[data-baseweb="popover"] *, [role="listbox"] * {
+  color:#000000 !important;
+}
+.stApp input, .stApp textarea, .stApp select,
+.stApp input::placeholder, .stApp textarea::placeholder,
+[data-baseweb="popover"], [role="listbox"] {
+  color:#000 !important; -webkit-text-fill-color:#000 !important;
+}
+[data-testid="stMetric"] {background:#FFFFFF; border:1px solid #CBD5E1; border-radius:12px; padding:12px;}
+[data-testid="stDataFrame"], [data-testid="stDataEditor"],
+[data-testid="stExpander"], [data-testid="stFileUploader"],
+[data-testid="stVerticalBlockBorderWrapper"] {color:#000!important;}
+.stApp button {color:#000!important; border-radius:8px;}
+.stButton > button[kind="primary"],button[data-testid="stBaseButton-primary"] {
+ background:#D5E9FF!important;color:#000!important;border-color:#4985BC!important;
+}
+.stButton > button[kind="primary"]:hover,button[data-testid="stBaseButton-primary"]:hover {
+ background:#B9DBFF!important;color:#000!important;
+}
+/* Fichas con control físico confirmado: fondo, borde y botón verdes. */
+[class*="st-key-pop_fisico_aprobado_"] {background:#DCFCE7!important; border:2px solid #16A34A!important; border-radius:12px; padding:8px;}
+[class*="st-key-pop_boton_aprobado_"] button {
+ background:#86EFAC!important; border:2px solid #15803D!important;
+ color:#000!important; opacity:1!important;
+}
+/* Texto de SVG Plotly y leyendas de gráficos. */
+.js-plotly-plot .plotly svg text {fill:#000000!important;}
 </style>""",unsafe_allow_html=True)
 
 
@@ -368,12 +386,17 @@ if not catalog:
     st.stop()
 
 include_hidden=st.checkbox('Incluir hojas ocultas del Excel',value=True,key=f'hidden_{period_key(view_period)}')
-rows=reconcile(catalog,p['remito_entries'],p['is_complete'],include_hidden)
+rows=reconciled_rows(p,include_hidden)
 summary=metrics(rows)
 cols=st.columns(5)
-for col,name,value in zip(cols,['Asignado DDV','Remito registrado','Coinciden','Diferencias','Pendientes'],
+for col,name,value in zip(cols,['Asignado DDV','Remito conciliado','Coinciden','Diferencias','Pendientes'],
                           [pretty(summary['asignado']),pretty(summary['recibido']),summary['coinciden'],summary['diferencias'],summary['pendientes']]):
     col.metric(name,value)
+if summary['verificados_fisicos']:
+    st.success(f'✅ {summary["verificados_fisicos"]} materiales verificados físicamente · '
+               f'{pretty(summary["recibido"])} unidades conciliadas · '
+               f'Lectura original de remitos: {pretty(summary["remito_original"])} unidades. '
+               'La lectura original se mantiene intacta para auditoría.')
 if p['preliminary']:
     if p['source_mode']=='Q3 2026 precargado':
         st.warning('**Q3 precargado · cifras provisionales:** la transcripción anterior de la foto no fue certificada. Podés reemplazarla subiendo nuevas fotos en «Período de carga: Q3 2026».')
@@ -412,12 +435,12 @@ with page_summary:
                    key=lambda e:e[1]['asignado'],reverse=True)
     if ordered:
         chart=go.Figure()
-        for title,key,color in [('Excel asignado','asignado','#266FBA'),('Remito registrado','recibido','#E6A144')]:
+        for title,key,color in [('Excel asignado','asignado','#266FBA'),('Remito conciliado','recibido','#E6A144')]:
             chart.add_trace(go.Bar(name=title,x=[x[key] for _,x in ordered],y=[label for label,_ in ordered],
                                    marker_color=color,orientation='h'))
         chart.update_layout(barmode='group',height=max(350,40*len(ordered)+110),
                             margin=dict(l=10,r=8,t=6,b=18),legend=dict(orientation='h',y=1.07),
-                            plot_bgcolor='#fff',paper_bgcolor='#fff',font=dict(color='#172A42'),yaxis=dict(autorange='reversed'),
+                            plot_bgcolor='#fff',paper_bgcolor='#fff',font=dict(color='#000000'),yaxis=dict(autorange='reversed'),
                             xaxis=dict(title='Unidades',gridcolor='#E7EDF4'))
         st.plotly_chart(chart,use_container_width=True,config={'displayModeBar':False})
     cc,dd=st.columns(2)
@@ -427,7 +450,8 @@ with page_summary:
     st.markdown('**Materiales que requieren atención**')
     if attention:
         st.dataframe(pd.DataFrame([{'Estado':r['estado'],'Hoja':r['hoja'],'Material':p['aliases'].get(r['id']) or r['material'],
-            'Excel':r['cantidad_excel'],'Remito':r['cantidad_remito'],'Diferencia':r['diferencia'],'Celda':r['celda']}
+            'Excel':r['cantidad_excel'],'Remito conciliado':r['cantidad_remito'],'Remito original':r['cantidad_remito_original'],
+            'Control físico':'Sí' if r['verificacion_fisica'] else 'No', 'Diferencia':r['diferencia'],'Celda':r['celda']}
             for r in sorted(attention,key=lambda r:(r['estado']=='Pendiente',-r['cantidad_excel']))]),
             hide_index=True,use_container_width=True,height=min(550,40*len(attention)+50))
     else:st.success('No hay diferencias ni renglones pendientes en el alcance seleccionado.')
@@ -440,8 +464,8 @@ with page_summary:
         with st.expander('Comparar indicadores con otros trimestres',expanded=False):
             compare=[]
             for label,item in [(view_period,p)]+other:
-                report=metrics(reconcile(item['catalog'],item['remito_entries'],item['is_complete'],include_hidden))
-                compare.append({'Período':label,'Asignado':report['asignado'],'Remito registrado':report['recibido'],
+                report=metrics(reconciled_rows(item,include_hidden))
+                compare.append({'Período':label,'Asignado':report['asignado'],'Remito conciliado':report['recibido'],
                     'Coinciden':report['coinciden'],'Diferencias':report['diferencias'],
                     'Pendientes':report['pendientes'],
                     'Control':'Revisado' if item['is_complete'] else 'Provisional'})
@@ -460,36 +484,113 @@ with page_ocr:
         q3.metric('Con material sugerido',sum(bool(x.get('sugerido')) for x in ocr))
         st.info('**Reconocimiento flexible:** tolera letras o números mal leídos en la descripción. Revisá las sugerencias de similitud baja, los formatos dudosos y cualquier diferencia de cantidad; no se corrigen cantidades para hacerlas coincidir.')
         st.caption(f'Acción seleccionada para esta lectura: **{p["ocr_operation"]}**. Reaplicar la misma tabla no suma dos veces los materiales.')
-        st.markdown('**Revisá la foto**: corregí la columna **Cantidad** y verificá **Material Excel**. La columna **Cantidad sugerida** es solo una pista: nunca se aplica sola. Para dudas, revisá **Alertas del match** y **Otras opciones**.')
-        table=make_ocr_table(p,names)
-        with st.form(f'ocr_form_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}'):
-            edited=st.data_editor(pd.DataFrame(table),use_container_width=True,hide_index=True,
-                height=525,num_rows='dynamic',
-                column_order=['Página','Cantidad','Cantidad sugerida (verificar)','Descripción OCR',
-                              'Material Excel','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa','Alertas del match','Otras opciones','Lectura','Ignorar'],
-                column_config={
-                    'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d',
-                       help='Cifra leída o corregida. Nunca se reemplaza automáticamente por la del Excel.'),
-                    'Cantidad sugerida (verificar)':st.column_config.NumberColumn(
-                       'Cifra OCR dudosa',format='%d',help='El OCR confundió caracteres como S y 5. Revisá la foto y escribí la cifra confirmada en Cantidad.'),
-                    'Similitud %':st.column_config.NumberColumn('Similitud %',format='%d%%',
-                       help='Puntaje aproximado de similitud de descripción, no de cantidad ni de recepción.'),
-                    'Excel sugerido':st.column_config.NumberColumn('Excel sugerido',format='%d'),
-                    'Diferencia tentativa':st.column_config.NumberColumn('Diferencia tentativa',format='%d'),
-                    'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
-                    'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=options,width='large'),
-                    'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
-                    'Página':st.column_config.TextColumn('Página',width='medium'),
-                    'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False)},
-                disabled=['Página','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa',
-                          'Cantidad sugerida (verificar)','Alertas del match','Otras opciones','Lectura'])
-            submitted=st.form_submit_button('✅ Aplicar revisión a este período',type='primary',use_container_width=True)
+        st.markdown('**Revisá la foto**: corregí la columna **Cantidad** y verificá **Material Excel**. Si no reconocés el material por el nombre, usá **🖼️ Elegir material por su foto**, debajo de la tabla: podés buscar, mirar miniaturas y pulsar **Seleccionar POP**.')
+        # Edición en vivo: guarda el borrador en la sesión, sin aplicar al remito
+        # hasta confirmar. Esto permite seleccionar imágenes SIN perder correcciones
+        # realizadas en la misma tabla.
+        draft_key=f'ocr_draft_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}'
+        editor_rev_key=f'ocr_editor_rev_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}'
+        if draft_key not in st.session_state:
+            st.session_state[draft_key]=make_ocr_table(p,names)
+        if editor_rev_key not in st.session_state:
+            st.session_state[editor_rev_key]=0
+        editor_key=f'ocr_editor_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}_{st.session_state[editor_rev_key]}'
+        edited=st.data_editor(pd.DataFrame(st.session_state[draft_key]),
+            use_container_width=True,hide_index=True,key=editor_key,
+            height=525,num_rows='dynamic',
+            column_order=['Página','Cantidad','Cantidad sugerida (verificar)','Descripción OCR',
+                          'Material Excel','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa','Alertas del match','Otras opciones','Lectura','Ignorar'],
+            column_config={
+                'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d',
+                   help='Cifra leída o corregida. Nunca se reemplaza automáticamente por la del Excel.'),
+                'Cantidad sugerida (verificar)':st.column_config.NumberColumn(
+                   'Cifra OCR dudosa',format='%d',help='El OCR confundió caracteres como S y 5. Revisá la foto y escribí la cifra confirmada en Cantidad.'),
+                'Similitud %':st.column_config.NumberColumn('Similitud %',format='%d%%',
+                   help='Puntaje aproximado de similitud de descripción, no de cantidad ni de recepción.'),
+                'Excel sugerido':st.column_config.NumberColumn('Excel sugerido',format='%d'),
+                'Diferencia tentativa':st.column_config.NumberColumn('Diferencia tentativa',format='%d'),
+                'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
+                'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=options,width='large'),
+                'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
+                'Página':st.column_config.TextColumn('Página',width='medium'),
+                'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False)},
+            disabled=['Página','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa',
+                      'Cantidad sugerida (verificar)','Alertas del match','Otras opciones','Lectura'])
+        # Guardar en sesión también las cantidades recién editadas antes de abrir
+        # el selector visual: el botón elige el POP sobre ESTA versión de la tabla.
+        st.session_state[draft_key]=edited.to_dict('records')
+        with st.expander('🖼️ Elegir material por su foto (selector visual de Material Excel)',expanded=True):
+            draft=st.session_state[draft_key]
+            if draft:
+                pending_rows=[i for i,r in enumerate(draft)
+                              if str(r.get('Material Excel',''))=='(sin asignar)']
+                current_row=st.selectbox(
+                    '1 · Seleccioná la fila del remito que querés relacionar con un POP',
+                    range(len(draft)),
+                    index=pending_rows[0] if pending_rows else 0,
+                    format_func=lambda i: f"Fila {i+1} · {str(draft[i].get('Descripción OCR') or 'Sin descripción')[:75]} · "
+                                          f"Cantidad: {draft[i].get('Cantidad') if integer_quantity(draft[i].get('Cantidad')) is not None else 'sin verificar'}",
+                    key=f'visual_ocr_row_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}')
+                selected_ocr=draft[current_row]
+                st.caption('OCR detectó: '+str(selected_ocr.get('Descripción OCR') or 'Sin descripción')+
+                           ' · Material elegido: '+str(selected_ocr.get('Material Excel') or '(sin asignar)'))
+                filter1,filter2,filter3=st.columns([3,2,1.2])
+                search_query=filter1.text_input('2 · Buscar material por nombre o tamaño',placeholder='Ej.: afiche 20x30, Brahma, Stella',
+                    key=f'visual_search_{period_key(view_period)}_{p["ocr_version"]}')
+                filter_sheet=filter2.selectbox('Hoja / marca', ['Todas']+sorted(set(c['hoja'] for c in catalog)),
+                    key=f'visual_sheet_{period_key(view_period)}_{p["ocr_version"]}')
+                photos_only=filter3.checkbox('Solo con foto',value=False,
+                    key=f'visual_photos_{period_key(view_period)}_{p["ocr_version"]}')
+                image_map=p.get('pop_images',{})
+                image_assets=st.session_state.pop_assets.get(view_period,{})
+                original_ocr=p['ocr_rows'][current_row] if current_row<len(p['ocr_rows']) else {}
+                preferred=preferred_ocr_ids(original_ocr)
+                candidates=visual_candidates(catalog,p['aliases'],search_query,filter_sheet,
+                    preferred,photos_only,image_map,image_assets)
+                st.caption(f'3 · Tocá **Seleccionar POP** debajo de su imagen. '
+                           f'Hay {len(candidates)} materiales disponibles; se muestran primero los sugeridos por el OCR.')
+                if candidates:
+                    per_page=12
+                    page_total=max(1,math.ceil(len(candidates)/per_page))
+                    pager_key=f'visual_page_{period_key(view_period)}_{p["ocr_version"]}'
+                    if st.session_state.get(pager_key,1)>page_total:st.session_state[pager_key]=page_total
+                    page_no=st.number_input('Página de fotos',min_value=1,max_value=page_total,
+                        value=1,step=1,key=pager_key)
+                    visible=candidates[(int(page_no)-1)*per_page:int(page_no)*per_page]
+                    for start in range(0,len(visible),3):
+                        columns=st.columns(3)
+                        for column,c in zip(columns,visible[start:start+3]):
+                            with column:
+                                cid=c['id']
+                                is_selected=selected_ocr.get('Material Excel')==names[cid]
+                                with st.container(border=True):
+                                    picture=image_assets.get(image_map.get(cid,''))
+                                    if picture:st.image(picture,use_container_width=True)
+                                    else:st.caption('🖼️ Este POP no tiene foto vinculada')
+                                    st.markdown('**'+str(p['aliases'].get(cid) or c['formato'])+'**')
+                                    st.caption(f"{c['hoja']} · {cid} · Excel DDV: {pretty(c['cantidad_excel'])}")
+                                    if cid in preferred:st.caption('⭐ Material sugerido por OCR')
+                                    if is_selected:st.success('✓ Seleccionado para esta fila')
+                                    if st.button('✓ Seleccionar POP',key=f'visual_pick_{period_key(view_period)}_{p["ocr_version"]}_{current_row}_{sha256(cid.encode()).hexdigest()[:12]}',
+                                                 use_container_width=True,disabled=is_selected):
+                                        st.session_state[draft_key]=choose_material(
+                                            st.session_state[draft_key],current_row,cid,names,catalog)
+                                        st.session_state[editor_rev_key]+=1
+                                        st.rerun()
+                else:
+                    st.info('No hay materiales que cumplan ese filtro. Probá buscar menos palabras o desactivar «Solo con foto».')
+            else:
+                st.warning('No hay filas OCR para seleccionar.')
+        submitted=st.button('✅ Aplicar revisión a este período',type='primary',use_container_width=True,
+                            help='Confirma las cantidades y las selecciones visuales para este trimestre.')
         if submitted:
             edited_rows=edited.to_dict('records')
             quantities,unknown,count=confirm_ocr_rows(edited_rows,valid_ids)
             p['ocr_edited_rows']=edited_rows
             p['ocr_edit_ver']+=1
-            p['remito_entries']=merge_quantities(p['ocr_base_entries'],quantities,p['ocr_operation'])
+            updated=merge_quantities(p['ocr_base_entries'],quantities,p['ocr_operation'])
+            invalidate_changed_checks(p,p['remito_entries'],updated,'Nueva lectura OCR aplicada')
+            p['remito_entries']=updated
             p['unmatched']=unknown
             p['is_complete']=False
             p['preliminary']=True
@@ -516,7 +617,7 @@ with page_ocr:
 
 with page_items:
     st.subheader(f'Control editable por material · {view_period}')
-    st.caption('Blanco significa material no verificado; 0 significa cero unidades recibidas, comprobado.')
+    st.caption('Remito original: cifra OCR/manual, sin modificaciones por tildes físicas. Conciliado: cantidad ajustada tras control presencial. Blanco significa no leído; 0 significa comprobado.')
     col1,col2,col3=st.columns([2,2,1])
     sheet=col1.selectbox('Hoja del Excel',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'filter_sheet_{period_key(view_period)}')
     status=col2.selectbox('Estado',['Todos','Diferencias y pendientes','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'filter_status_{period_key(view_period)}')
@@ -527,7 +628,9 @@ with page_items:
                  if status=='Diferencias y pendientes' else r['estado']==status))]
     manual=[{'ID':r['id'],'Hoja':r['hoja'],'Material':p['aliases'].get(r['id']) or r['material'],
              'Celda':r['celda'],'Excel':r['cantidad_excel'],
-             'Remito':p['remito_entries'].get(r['id']),
+             'Remito original':p['remito_entries'].get(r['id']),
+             'Conciliado':r['cantidad_remito'],
+             'Control físico':'Sí' if r['verificacion_fisica'] else 'No',
              'Diferencia':r['diferencia'],'Estado':r['estado']} for r in display]
     if not manual:st.info('No hay materiales para estos filtros.')
     else:
@@ -536,15 +639,16 @@ with page_items:
                 height=530,num_rows='fixed',
                 column_config={'ID':None,'Material':st.column_config.TextColumn('Material',width='large'),
                     'Excel':st.column_config.NumberColumn('Excel',format='%d'),
-                    'Remito':st.column_config.NumberColumn('Remito',min_value=0,step=1,format='%d')},
-                disabled=['ID','Hoja','Material','Celda','Excel','Diferencia','Estado'])
+                    'Remito original':st.column_config.NumberColumn('Remito original editable',min_value=0,step=1,format='%d')},
+                disabled=['ID','Hoja','Material','Celda','Excel','Conciliado','Control físico','Diferencia','Estado'])
             manual_save=st.form_submit_button('Guardar correcciones de este trimestre',type='primary')
         if manual_save:
             update=dict(p['remito_entries'])
             for obj in manual_edit.to_dict('records'):
-                amount=integer_quantity(obj['Remito'])
+                amount=integer_quantity(obj['Remito original'])
                 if amount is None:update.pop(obj['ID'],None)
                 else:update[obj['ID']]=amount
+            invalidate_changed_checks(p,p['remito_entries'],update,'Edición manual de remito')
             p['remito_entries']=update;p['edit_version']+=1
             p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label()
             persist_changes()
@@ -563,22 +667,35 @@ with page_items:
     with st.expander('Reiniciar cantidades de este trimestre'):
         st.warning('Esta acción borra solo las cantidades de remito de este período. No modifica los otros trimestres ni las asignaciones del Excel.')
         if st.button(f'Borrar cantidades de {view_period}',key=f'clear_{period_key(view_period)}'):
+            clear_checks(p,'Reinicio de cantidades del trimestre')
             p['remito_entries']={};p['unmatched']=[];p['is_complete']=False;p['preliminary']=False
             p['edit_version']+=1;p['last_updated']=now_label();persist_changes()
 
 with page_gallery:
     st.subheader(f'Galería de POP · {view_period}')
-    st.caption('Imágenes reales incrustadas en el Excel de asignación. Cantidades: fila DDV de cada hoja vs. remitos registrados del período.')
+    st.caption('Control presencial: en cada POP pendiente, faltante o sobrante presioná ✅ si comprobaste '
+               'físicamente que la cantidad correcta es la asignada. La cifra original del remito '
+               'no se borra y podés deshacer la verificación.')
     gallery_assets=st.session_state.pop_assets.get(view_period,{})
     image_map=p.get('pop_images',{})
     c1,c2,c3=st.columns([2,2,1])
     gallery_search=c1.text_input('Buscar material',key=f'gallery_search_{period_key(view_period)}',placeholder='Marca, tamaño, campaña…')
     gallery_sheet=c2.selectbox('Familia / hoja',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'gallery_sheet_{period_key(view_period)}')
-    gallery_status=c3.selectbox('Estado',['Todos','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'gallery_status_{period_key(view_period)}')
+    gallery_status=c3.selectbox('Estado',['Todos','Diferencias y pendientes','Verificados físicamente',
+                                             'Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],
+                                key=f'gallery_status_{period_key(view_period)}')
     q=gallery_search.strip().casefold()
+    def gallery_match(r):
+        if gallery_status=='Todos':return True
+        if gallery_status=='Verificados físicamente':return r['verificacion_fisica']
+        if gallery_status=='Diferencias y pendientes':
+            return r['estado'] in ('Pendiente','Faltante','Sobrante') or r['verificacion_fisica']
+        if gallery_status in ('Pendiente','Faltante','Sobrante'):
+            return r['estado']==gallery_status or (r['verificacion_fisica'] and r['estado_original']==gallery_status)
+        return r['estado']==gallery_status
     gallery_rows=[r for r in rows if (r['cantidad_excel']>0 or r['verificado'])
                   and (gallery_sheet=='Todas' or r['hoja']==gallery_sheet)
-                  and (gallery_status=='Todos' or r['estado']==gallery_status)
+                  and gallery_match(r)
                   and (not q or q in (str(p['aliases'].get(r['id']) or '')+' '+r['material']+' '+r['hoja']).casefold())]
     with st.expander('Asignar o reemplazar la imagen de un POP',expanded=False):
         material_options={f"{r['hoja']} · {r['formato']} · {r['id']}":r['id'] for r in rows}
@@ -594,15 +711,22 @@ with page_gallery:
             except Exception as exc:st.error(f'Imagen inválida: {exc}')
     gallery_total=len(gallery_rows)
     pages=max(1,math.ceil(gallery_total/12))
-    page_number=st.number_input('Página de la galería',min_value=1,max_value=pages,value=1,step=1,
-                                 key=f'gallery_page_{period_key(view_period)}')
-    st.caption(f'{gallery_total} materiales · Página {page_number} de {pages} · {sum(r["id"] in image_map and image_map[r["id"]] in gallery_assets for r in gallery_rows)} con imagen')
+    page_key=f'gallery_page_{period_key(view_period)}'
+    # Un filtro puede reducir las páginas después de aprobar. Evitar la excepción
+    # de un number_input cuyo valor previo queda fuera del rango.
+    if st.session_state.get(page_key,1)>pages:st.session_state[page_key]=pages
+    page_number=st.number_input('Página de la galería',min_value=1,max_value=pages,value=1,step=1,key=page_key)
+    st.caption(f'{gallery_total} materiales · Página {page_number} de {pages} · '
+               f'{sum(r["id"] in image_map and image_map[r["id"]] in gallery_assets for r in gallery_rows)} con imagen · '
+               f'{sum(r["verificacion_fisica"] for r in gallery_rows)} verificados físicamente')
     part=gallery_rows[(int(page_number)-1)*12:int(page_number)*12]
     for start in range(0,len(part),3):
         columns=st.columns(3)
         for box,r in zip(columns,part[start:start+3]):
             with box:
-                with st.container(border=True):
+                hash_key=sha256((view_period+'|'+r['id']).encode('utf-8')).hexdigest()[:18]
+                tile_key=('pop_fisico_aprobado_' if r['verificacion_fisica'] else 'pop_pendiente_')+hash_key
+                with st.container(border=True,key=tile_key):
                     pic=gallery_assets.get(image_map.get(r['id'],''))
                     if pic:st.image(pic,use_container_width=True)
                     else:st.info('Sin imagen vinculada · cargala arriba')
@@ -610,17 +734,44 @@ with page_gallery:
                     st.caption(f"{r['hoja']} · {r['celda']} · {r['estado']}")
                     a,b=st.columns(2)
                     a.metric('Asignado',pretty(r['cantidad_excel']))
-                    b.metric('Remito','—' if r['cantidad_remito'] is None else pretty(r['cantidad_remito']))
-                    if r['diferencia'] is None:st.caption('Diferencia pendiente de comprobar')
-                    elif r['diferencia']==0:st.success('Coincide · diferencia 0')
-                    elif r['diferencia']<0:st.error(f"Faltan {pretty(abs(r['diferencia']))} unidades")
-                    else:st.warning(f"Sobran {pretty(r['diferencia'])} unidades")
+                    b.metric('Remito conciliado','—' if r['cantidad_remito'] is None else pretty(r['cantidad_remito']))
+                    if r['verificacion_fisica']:
+                        st.button('✅ Verificado físicamente',key='pop_boton_aprobado_'+hash_key,
+                                  disabled=True,use_container_width=True)
+                        original=r['cantidad_remito_original']
+                        st.caption('Remito original: '+('Sin lectura' if original is None else pretty(original))+
+                                   f' · Comprobado: {r["fecha_verificacion"] or "sin fecha"}')
+                        if st.button('↶ Deshacer control físico',key='undo_fisico_'+hash_key,
+                                     use_container_width=True):
+                            undo_material(p,r['id'])
+                            p['last_updated']=now_label();p['edit_version']+=1
+                            persist_changes()
+                    else:
+                        if r['diferencia'] is None:st.caption('Diferencia pendiente de comprobar')
+                        elif r['diferencia']==0:st.success('Coincide · diferencia 0')
+                        elif r['diferencia']<0:st.error(f"Faltan {pretty(abs(r['diferencia']))} unidades")
+                        else:st.warning(f"Sobran {pretty(r['diferencia'])} unidades")
+                        if r['estado'] in ('Pendiente','Faltante','Sobrante'):
+                            if st.button('✅ Verificado físicamente',key='aprobar_fisico_'+hash_key,
+                                         use_container_width=True,help='Confirmar inspección presencial. '
+                                         'Iguala la cantidad CONCILIADA a la asignada, sin borrar el remito original.'):
+                                approve_material(p,r['id'])
+                                p['last_updated']=now_label();p['edit_version']+=1
+                                persist_changes()
     if not part:st.info('No hay materiales para estos filtros.')
+    if p.get('physical_events'):
+        with st.expander(f'Historial de verificaciones físicas ({len(p["physical_events"])})'):
+            st.dataframe(pd.DataFrame([{ 'Fecha (UTC)':e.get('fecha',''),
+                'Material':e.get('material_id',''),'Acción':e.get('accion',''),
+                'Remito original':e.get('cantidad_remito_original'),
+                'Cantidad conciliada':e.get('cantidad_conciliada'),
+                'Motivo':e.get('motivo','')}
+                for e in reversed(p['physical_events'])]),use_container_width=True,hide_index=True)
 
 with page_history:
     st.subheader(f'Remitos registrados · {view_period}')
     events=p.get('remito_history',[])
-    st.caption('Cada incorporación de un remito queda registrada con fecha, archivos, operación y estado de revisión. Las imágenes se conservan en el almacenamiento configurado.')
+    st.caption('Cada incorporación de un remito queda registrada con fecha, archivos, operación y estado. Las comprobaciones presenciales de POP se registran por separado en la Galería y en el respaldo JSON.')
     if events:
         st.dataframe(pd.DataFrame([{
             'Fecha':e.get('fecha',''), 'Operación':e.get('accion',''),
@@ -672,7 +823,7 @@ with page_export:
     if p['issues']:
         st.markdown('**Alertas de lectura Excel**')
         for issue in p['issues']:st.caption('• '+str(issue))
-    st.info('Con GitHub privado configurado, el registro y las fotografías se guardan de forma permanente. El historial JSON es un respaldo adicional, sin imágenes.')
+    st.info('Con GitHub privado configurado, el registro, las tildes de verificación física y las fotografías se conservan. El JSON respalda resultados e historial, pero no incluye las imágenes.')
     st.download_button('⬇️ Descargar imágenes de POP y remitos (ZIP)',
         write_zip_assets(st.session_state.pop_assets.get(view_period,{})),
         file_name=f'POP_DDV_{period_key(view_period)}_imagenes.zip',mime='application/zip')

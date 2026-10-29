@@ -1,6 +1,59 @@
+# Novedad: selector visual de materiales en Lectura OCR
+
+En la pestaña **📷 Lectura OCR** sigue disponible la columna **Material Excel** con
+su lista desplegable tradicional. Como las opciones de un `SelectboxColumn` de
+Streamlit no admiten miniaturas dentro de la lista, se añadió debajo de la tabla
+el panel **🖼️ Elegir material por su foto**:
+
+1. Seleccioná el **renglón del remito** (se muestra su texto OCR y cantidad).
+2. Buscá un POP por nombre, medida, campaña o marca; también podés filtrar por
+   hoja del Excel y elegir **Solo con foto**.
+3. El panel prioriza los materiales sugeridos por el OCR y muestra sus imágenes
+   reales extraídas del Excel de ese trimestre (o las cargadas en la galería),
+   la descripción, la hoja y la cantidad asignada a DDV.
+4. Presioná **✓ Seleccionar POP** en la ficha correcta: la elección aparecerá
+   inmediatamente en la columna **Material Excel** de ese renglón.
+5. Revisá/corregí la cantidad del remito en la tabla y presioná **✅ Aplicar
+   revisión a este período** para guardar los cambios del control.
+
+**Seguridad de la conciliación:** elegir una fotografía no copia cantidades del
+Excel en el campo del remito. Si el OCR no leyó una cifra, esa cifra sigue
+pendiente hasta que alguien la complete. La sugerencia OCR original se conserva
+para auditoría. La aplicación mantiene el tema claro con letras negras.
+
+Si Q4 no trae fotografías incrustadas, se pueden cargar desde **🖼️ Galería de
+POP → Asignar o reemplazar la imagen de un POP**. Solo aparece una miniatura
+cuando existe una foto vinculada al material.
+
+## Actualización en GitHub
+
+Reemplazá los archivos de tu aplicación por los de este paquete (no el repositorio
+privado donde se guardan los registros). Es obligatorio subir `visual_match.py`
+junto con el nuevo `app.py`, las carpetas `data/` y `.streamlit/`, y los demás
+módulos. Hacé **Commit changes**; Streamlit Cloud volverá a desplegar la app.
+Las credenciales de GitHub siguen en **Secrets** y nunca deben subirse al repo.
+
+---
+
 # Control de POP liviano · DDV · Q3 / Q4
 
 Tablero en **Streamlit** para el control trimestral del POP liviano de **Distribuidora del Valle S.A.**. Listo para subir a GitHub y desplegar en Streamlit Community Cloud.
+
+## NUEVA: verificación física por POP y todas las fuentes negras
+
+En **🖼️ Galería de POP**, para cada material **Pendiente**, **Faltante** o **Sobrante** aparece el botón **✅ Verificado físicamente**. Usalo **solo después de revisar presencialmente el material**. Al pulsarlo:
+
+- La tarjeta se pone **verde** y muestra una tilde de **verificación física**.
+- La cantidad **conciliada** pasa a ser exactamente la **cantidad asignada a DDV en el Excel** y la diferencia pasa a cero.
+- La **cantidad original leída en el remito permanece guardada**: NO se altera el dato de origen ni se reescribe el Excel. Ejemplo: remito 80, asignado 100 → conciliado 100, original 80, diferencia 0.
+- Se guarda un evento con fecha UTC, material y cantidades. Los cambios se guardan en el repositorio remoto de datos si configuraste Secrets.
+- La tarjeta queda visible en los filtros de diferencias mediante el **estado original** y también en **Verificados físicamente**.
+- El botón **↶ Deshacer control físico** anula la aprobación, restaura automáticamente la comparación original y deja registro de la reversión.
+- Si una nueva lectura OCR o una corrección manual cambia ese material, se **invalida solo la aprobación afectada** para exigir una nueva revisión física. Al borrar el control trimestral, se invalidan todas las verificaciones de ese período.
+
+Los **textos de toda la app son negros**, incluidos barra lateral, botones, tarjetas, menús, tablas, gráficos y formularios. Se forzó el tema claro para evitar blanco sobre blanco.
+
+La pestaña **🧾 Control por material** distingue entre `Remito original` (editable), `Conciliado` (derivado) y `Control físico`. El CSV exporta ambos valores y la fecha de verificación. El respaldo JSON conserva las aprobaciones y los eventos para Q3/Q4 y nuevos períodos.
 
 ## Novedades de esta entrega
 
@@ -56,8 +109,8 @@ El programa funciona en una computadora con almacenamiento local `.local_store`,
 2. Q3 ya tiene el Excel, catálogo, imágenes y lectura provisional. En Q4 subí el Excel correspondiente; el sistema lee solamente filas DDV (incluidas hojas ocultas) y extrae las imágenes si están incrustadas.
 3. Elegí una de las operaciones: **Reemplazar cantidades anteriores**, **Agregar páginas al remito actual**, o **Agregar un remito nuevo al período**. Agregar suma cantidades; reemplazar las sustituye al confirmar.
 4. Subí fotos o un PDF de hasta tres páginas, pulsá **Leer remito**. La nueva carga se registra en el historial como *OCR pendiente* y las fotos quedan guardadas. No vuelvas a cargar el mismo remito en modo «Agregar».
-5. En **📷 Lectura OCR**, revisá cantidades dudosas y seleccioná los materiales adecuados. Pulsá **Aplicar revisión**. Las cantidades se cotejan **exactamente**; la tolerancia de letras y números mal reconocidos se aplica **al nombre del material**, no al conteo de unidades.
-6. En **🖼️ Galería de POP**, compará la imagen, la asignación y la cantidad del remito. Si falta una imagen, asignala desde la galería.
+5. En **📷 Lectura OCR**, revisá cantidades dudosas y seleccioná los materiales adecuados. Pulsá **Aplicar revisión**. Las cantidades se cotejan **exactamente** antes del control físico; la tolerancia de errores OCR se aplica **al nombre del material**, no al conteo de unidades. Solo el botón de verificación **manual** modifica la cantidad conciliada.
+6. En **🖼️ Galería de POP**, compará imagen, asignación y remito. Si falta o sobra material o está pendiente, tras verificarlo presencialmente pulsá **✅ Verificado físicamente**. La ficha se pone verde, la cantidad conciliada se ajusta a la asignada y el original queda registrado. Si necesitás revertirlo, pulsá **↶ Deshacer control físico**. Si falta una imagen, asignala desde la galería.
 7. En **📑 Remitos registrados**, verificá si se cargó un nuevo remito y revisá sus fotos.
 8. Los cambios se guardan automáticamente cuando se confirman, si GitHub está configurado. Opcionalmente usá **Guardar cambios pendientes**.
 
@@ -65,7 +118,7 @@ El programa funciona en una computadora con almacenamiento local `.local_store`,
 
 Subí el contenido descomprimido de este ZIP al repositorio **de la aplicación** y elegí Commit Changes. Conservá la estructura y agregá todos los nuevos archivos:
 
-- `app.py`, `period_store.py`, `media_core.py`, `persistence.py` y módulos existentes de OCR/conciliación.
+- `app.py`, `period_store.py`, **`physical_checks.py`**, `pop_core.py`, `media_core.py`, `persistence.py` y módulos existentes de OCR/conciliación.
 - `data/q3_2026_preliminar.json`, `data/q3_gallery.zip`, `data/q3_pop_map.json` (imágenes Q3 precargadas).
 - `.streamlit/config.toml`, `requirements.txt`, `packages.txt`, `tests/`.
 
@@ -78,7 +131,7 @@ Subí el contenido descomprimido de este ZIP al repositorio **de la aplicación*
 - Los registros históricos originales del remito Q3 contienen una lectura **provisional**, no una recepción certificada.
 - Los respaldos JSON conservan valores e historial, pero las imágenes se respaldan por separado en ZIP. La configuración remota guarda ambos.
 - El servidor de GitHub debe aceptar los cambios (si aparece una alerta de error no se marca el guardado como exitoso). Los repositorios de datos separados evitan que cada registro active un redespliegue de la aplicación.
-- Pruebas de lógica: `python -m unittest discover -s tests -v`. No se realizó un despliegue real en tu cuenta de Streamlit Cloud durante esta entrega.
+- Pruebas de lógica (incluidas verificaciones físicas y auditoría): `python -m unittest discover -s tests -v`. No se realizó un despliegue real en tu cuenta de Streamlit Cloud durante esta entrega.
 
 ## Ejecutar localmente
 

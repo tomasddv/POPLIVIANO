@@ -14,6 +14,7 @@ FIELDS = (
     'ocr_raw','ocr_warnings','ocr_edited_rows','ocr_version','ocr_edit_ver',
     'edit_version','remito_files','processed_signatures','ocr_signature',
     'remito_history','pending_remito_id','pop_images',
+    'physical_checks','physical_events',
     'ocr_operation','ocr_base_entries','notes','last_updated','preliminary',
 )
 
@@ -29,6 +30,7 @@ def empty_period():
         'ocr_signature':None,'ocr_operation':'Reemplazar cantidades anteriores',
         'ocr_base_entries':{},'notes':'','last_updated':'','preliminary':False,
         'ocr_previews':[],'remito_history':[], 'pending_remito_id':None, 'pop_images':{},
+        'physical_checks':{},'physical_events':[],
     }
 
 
@@ -104,5 +106,9 @@ def restore_archive(content: bytes):
         if len(ids)!=len(p['catalog']):raise ValueError(f'Catálogo inválido para {label}.')
         if any(id_ not in ids for id_ in p['remito_entries']):
             raise ValueError(f'El respaldo contiene materiales desconocidos para {label}.')
+        if not isinstance(p['physical_checks'],dict) or not isinstance(p['physical_events'],list):
+            raise ValueError(f'Controles físicos inválidos para {label}.')
+        if any(id_ not in ids or not isinstance(info,dict) for id_,info in p['physical_checks'].items()):
+            raise ValueError(f'El respaldo contiene controles físicos desconocidos para {label}.')
         restored[label]=p
     return restored
