@@ -1,3 +1,15 @@
+> **CORRECCIÓN 29/10/2026 — Error TypeError al abrir Resultados Q3**
+>
+> Si veías un error en `physical_checks.py`, línea 82, causado por una versión
+> antigua de `pop_core.py`, este paquete ya lo corrige. La conciliación ahora
+> funciona tanto con la firma de cuatro argumentos como con la más nueva.
+> **Reemplazá todos los archivos del repositorio de la app por los de este ZIP**, especialmente
+> `app.py`, `physical_checks.py` y `pop_core.py`; no modifiques el repositorio
+> privado usado para guardar datos. Los Q3/Q4 existentes, las fotos, las
+> tildes verdes y el historial de remitos se conservan.
+> Tras subir los archivos, esperá a que Streamlit termine el despliegue y
+> actualizá la página con **Ctrl+F5**.
+
 # Novedad: selector visual de materiales en Lectura OCR
 
 En la pestaña **📷 Lectura OCR** sigue disponible la columna **Material Excel** con

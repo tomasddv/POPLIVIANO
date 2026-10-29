@@ -15,13 +15,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ocr_core import read_documents
-from pop_core import catalog_from_excel, integer_quantity, metrics, reconcile, suggest_matches, to_csv
+from pop_core import catalog_from_excel, integer_quantity, suggest_matches
 from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantities,
                           new_source, restore_archive)
 from media_core import extract_pop_images, make_scan_previews, image_jpeg
 from persistence import make_store, read_zip_assets, write_zip_assets, StorageError
 from physical_checks import (approve_material, undo_material, invalidate_changed_checks,
-                             clear_checks, reconciled_rows)
+                             clear_checks, reconciled_rows, metrics, to_csv)
 from visual_match import visual_candidates, preferred_ocr_ids, choose_material
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')

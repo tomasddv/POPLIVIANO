@@ -7,7 +7,8 @@ una aprobación restaura la lectura original sin perder historia.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from copy import deepcopy
+from io import StringIO
+import csv
 from pop_core import integer_quantity, reconcile
 
 
@@ -78,7 +79,83 @@ def clear_checks(period: dict, reason: str) -> None:
         period['physical_events'][-1]['motivo'] = reason
 
 
-def reconciled_rows(period: dict, include_hidden=True):
-    return reconcile(period['catalog'], period['remito_entries'],
-                     period['is_complete'], include_hidden,
-                     period.get('physical_checks', {}))
+def reconciled_rows(period: dict, include_hidden: bool = True) -> list[dict]:
+    """Concilia todas las versiones de pop_core (4 o 5 argumentos).
+
+    Algunas instalaciones de GitHub conservan pop_core.py de una versión
+    anterior, cuya función reconcile solo admite cuatro argumentos. Las
+    verificaciones físicas se aplican aquí, después de la conciliación base,
+    para que no importe qué versión de reconcile esté instalada.
+    """
+    quantities = period.get('remito_entries') or {}
+    completed = bool(period.get('is_complete', False))
+    checks = period.get('physical_checks') or {}
+    # Exactamente cuatro argumentos: compatible con la función antigua y nueva.
+    rows = reconcile(period['catalog'], quantities, completed, include_hidden)
+
+    for row in rows:
+        material_id = row['id']
+        expected = integer_quantity(row.get('cantidad_excel'))
+        if expected is None:
+            raise ValueError(f'Cantidad Excel inválida para {material_id}.')
+        raw = quantities.get(material_id)
+        original = integer_quantity(raw) if raw is not None else (0 if completed else None)
+        if original is None:
+            original_status = 'Pendiente' if expected > 0 else 'Sin movimiento'
+        elif original == expected:
+            original_status = 'Coincide'
+        elif original < expected:
+            original_status = 'Faltante'
+        else:
+            original_status = 'Sobrante'
+
+        verification = checks.get(material_id)
+        verified = verification is not None
+        reconciled = expected if verified else original
+        delta = reconciled - expected if reconciled is not None else None
+        if delta is None:
+            status = 'Pendiente' if expected > 0 else 'Sin movimiento'
+        elif delta == 0:
+            status = 'Coincide'
+        elif delta < 0:
+            status = 'Faltante'
+        else:
+            status = 'Sobrante'
+
+        row.update(cantidad_remito=reconciled,
+                   cantidad_remito_original=original,
+                   diferencia=delta,
+                   estado=status,
+                   estado_original=original_status,
+                   verificacion_fisica=verified,
+                   fecha_verificacion=verification.get('fecha') if verified else None,
+                   verificado=material_id in quantities or verified)
+    return rows
+
+
+def metrics(rows: list[dict]) -> dict:
+    """Métricas completas incluso con un pop_core.py antiguo."""
+    return {
+        'asignado': sum(r['cantidad_excel'] for r in rows),
+        'recibido': sum(r['cantidad_remito'] or 0 for r in rows),
+        'coinciden': sum(r['estado'] == 'Coincide' for r in rows),
+        'diferencias': sum(r['estado'] in ('Faltante', 'Sobrante') for r in rows),
+        'pendientes': sum(r['estado'] == 'Pendiente' for r in rows),
+        'verificados_fisicos': sum(bool(r.get('verificacion_fisica')) for r in rows),
+        'remito_original': sum(r.get('cantidad_remito_original') or 0 for r in rows),
+        'faltan_unidades': sum(-r['diferencia'] for r in rows if r['diferencia'] is not None and r['diferencia'] < 0),
+        'sobran_unidades': sum(r['diferencia'] for r in rows if r['diferencia'] is not None and r['diferencia'] > 0),
+    }
+
+
+def to_csv(rows: list[dict]) -> bytes:
+    """Exporta cifras originales y conciliadas sin depender de pop_core."""
+    f = StringIO()
+    cols = ['hoja', 'grupo', 'formato', 'material', 'celda', 'cantidad_excel',
+            'cantidad_remito_original', 'cantidad_remito', 'diferencia', 'estado',
+            'estado_original', 'verificacion_fisica', 'fecha_verificacion',
+            'verificado', 'oculta']
+    writer = csv.DictWriter(f, fieldnames=cols, delimiter=';', extrasaction='ignore')
+    writer.writeheader()
+    writer.writerows(rows)
+    return ('\ufeff' + f.getvalue()).encode('utf-8')
