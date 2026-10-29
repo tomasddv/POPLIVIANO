@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from ocr_core import read_documents
-from pop_core import catalog_from_excel, integer_quantity, suggest_matches
+from pop_core import catalog_from_excel, integer_quantity, suggest_matches, active_catalog, classify_out_of_scope
 from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantities,
                           new_source, restore_archive)
 from media_core import extract_pop_images, make_scan_previews, image_jpeg
@@ -131,7 +131,7 @@ def period_key(label):
 
 def labels_for(catalog,aliases):
     return {c['id']:f"{c['id']} | {aliases.get(c['id']) or c['material']} [{c['celda']}]"
-            for c in catalog}
+            for c in active_catalog(catalog)}
 
 
 def now_label():
@@ -142,7 +142,7 @@ def make_ocr_table(p, names):
     if p.get('ocr_edited_rows') is not None:
         # Compatibilidad con respaldos JSON anteriores, cuyas tablas no tenían
         # similitud, alertas ni la nueva columna de cantidad OCR sugerida.
-        defaults={'Cantidad sugerida (verificar)':None,'Similitud %':None,
+        defaults={'Cantidad sugerida (verificar)':None,'Origen cantidad':'', 'Similitud %':None,
                   'Excel sugerido':None,'Diferencia tentativa':None,
                   'Otras opciones':'','Alertas del match':'', 'Ignorar':False}
         return [{**defaults,**row} for row in p['ocr_edited_rows']]
@@ -157,6 +157,7 @@ def make_ocr_table(p, names):
             'Página':x.get('pagina',''),
             'Cantidad':qty,
             'Cantidad sugerida (verificar)':x.get('cantidad_sugerida'),
+            'Origen cantidad':x.get('origen_cantidad',''),
             'Descripción OCR':x.get('detalle',''),
             'Material Excel':names.get(x.get('id',''),'(sin asignar)'),
             'Sugerencia':names.get(x.get('sugerido',''),'—'),
@@ -166,7 +167,7 @@ def make_ocr_table(p, names):
             'Otras opciones':options,
             'Alertas del match':' / '.join(x.get('alertas_match',[])),
             'Lectura':x.get('estado_match',''),
-            'Ignorar':False})
+            'Ignorar':bool(x.get('fuera_ddv'))})
     return table
 
 
@@ -323,8 +324,8 @@ with st.sidebar:
     uploading=periods[load_period]
     st.markdown(f'**Carga de {load_period}**')
     if uploading['catalog']:
-        assigned=sum(int(c['cantidad_excel']) for c in uploading['catalog'])
-        st.success(f'{len(uploading["catalog"])} materiales de DDV · {pretty(assigned)} unidades asignadas')
+        assigned=sum(int(c['cantidad_excel']) for c in active_catalog(uploading['catalog']))
+        st.success(f'{len(active_catalog(uploading["catalog"]))} POP asignados a DDV · {pretty(assigned)} unidades asignadas')
         st.caption(f'Excel: {uploading["source_name"]}')
     else:st.warning('Todavía no se cargó el Excel de este período.')
     uploaded_excel=st.file_uploader('1. Subir o reemplazar Excel de asignación',type=['xlsx'],key=f'xl_{period_key(load_period)}')
@@ -374,7 +375,8 @@ with st.sidebar:
             else:
                 with st.spinner(f'Leyendo páginas de {load_period}…'):
                     result=read_documents(files,two_columns=two_columns,split=split,max_pages=3)
-                    suggestions=suggest_matches(result.rows,uploading['catalog'],uploading['aliases'])
+                    suggestions=suggest_matches(result.rows,active_catalog(uploading['catalog']),uploading['aliases'])
+                    suggestions=classify_out_of_scope(suggestions,uploading['catalog'],uploading['aliases'])
                 imgs=make_scan_previews(files,max_pages=3)
                 upload_id=sha256((signature+datetime.now().isoformat()).encode()).hexdigest()[:18]
                 imgs_keys=[f'remitos/{upload_id}/pagina_{i+1:02d}.jpg' for i in range(len(imgs))]
@@ -439,7 +441,7 @@ if load_period!=view_period:
     st.info(f'Estás **cargando en {load_period}** y **consultando {view_period}**. Las operaciones de carga no modifican el período que estás viendo.')
 
 p=periods[view_period]
-catalog=p['catalog']
+catalog=active_catalog(p['catalog'])
 if not catalog:
     st.warning(f'No hay Excel cargado para {view_period}. Seleccionalo como «Período de carga» y subí su archivo.')
     st.stop()
@@ -483,7 +485,7 @@ page_summary,page_ocr,page_items,page_gallery,page_history,page_labels,page_expo
 with page_summary:
     # Tabla visual, al estilo de las hojas del Excel: cada columna es un POP.
     st.subheader(f'Planilla visual de POP · {view_period}')
-    st.caption('Cada columna representa un material del Excel de DDV: foto arriba y cantidades debajo. '
+    st.caption('Solo POP asignados con unidades a DDV: foto arriba y cantidades debajo. '
                'La diferencia y el estado reflejan las tildes de verificación física de la galería. '
                'El remito original nunca se modifica.')
     sheet_options=['Todas las hojas'] + list(dict.fromkeys(r['hoja'] for r in rows))
@@ -500,8 +502,7 @@ with page_summary:
                                               key=f'visual_resumen_buscar_{period_key(view_period)}')
     page_size=matrix_col_n.selectbox('POP por página',[4,6,8,12],
                                       key=f'visual_resumen_paginacion_{period_key(view_period)}')
-    show_zero=st.checkbox('Incluir POP sin asignación a DDV',value=False,
-                          key=f'visual_resumen_ceros_{period_key(view_period)}')
+    show_zero=False  # El usuario pide catálogo DDV positivo exclusivamente.
     matrix_rows=filter_visual_rows(rows,p.get('aliases',{}),sheet_filter,status_filter,search_filter,show_zero)
     total_pages=max(1,math.ceil(len(matrix_rows)/page_size))
     matrix_page_key=f'visual_resumen_pagina_{period_key(view_period)}'
@@ -573,7 +574,7 @@ with page_summary:
 
 with page_ocr:
     st.subheader(f'Leer y revisar fotos · {view_period}')
-    st.caption('El nombre se compara de forma flexible (errores de letras y cifras del nombre), pero las CANTIDADES se comparan exactamente. Toda sugerencia debe revisarse.')
+    st.caption('El nombre se compara por alias, marca y medida. Las filas sin cifra heredan el último valor expreso en la misma columna/página, marcado para revisión. Las cantidades no se modifican para forzar coincidencias.')
     for warning in p['ocr_warnings']:st.warning(warning)
     if not p['ocr_rows']:
         st.info('Este trimestre no tiene una extracción OCR editable. Podés subir una imagen nueva y ejecutar «Leer remito para este período».')
@@ -582,9 +583,15 @@ with page_ocr:
         q1,q2,q3=st.columns(3)
         q1.metric('Renglones OCR',len(ocr));q2.metric('Con cantidad',sum(x.get('cantidad') is not None for x in ocr))
         q3.metric('Con material sugerido',sum(bool(x.get('sugerido')) for x in ocr))
-        st.info('**Reconocimiento flexible:** tolera letras o números mal leídos en la descripción. Revisá las sugerencias de similitud baja, los formatos dudosos y cualquier diferencia de cantidad; no se corrigen cantidades para hacerlas coincidir.')
+        outside=[x for x in ocr if x.get('fuera_ddv')]
+        if outside:
+            st.warning(f'{len(outside)} referencias del remito tienen asignación DDV=0. Quedaron marcadas como «Ignorar» de forma reversible; no suman al recibido DDV.')
+            with st.expander('Ver detalle de material fuera de asignación DDV'):
+                st.dataframe(pd.DataFrame([{'Remito':x.get('detalle'),'Cantidad':x.get('cantidad'),
+                    'Motivo':x.get('razon_fuera_ddv')} for x in outside]),hide_index=True,use_container_width=True)
+        st.info('**Cantidad por continuidad:** si una línea no tiene número, usa el último valor expreso de su columna/página y lo marca como heredado. Revisá **Origen cantidad** antes de aplicar. Las medidas y marcas se reconocen con alias (por ejemplo, Andes/AO).')
         st.caption(f'Acción seleccionada para esta lectura: **{p["ocr_operation"]}**. Reaplicar la misma tabla no suma dos veces los materiales.')
-        st.markdown('**Revisá la foto**: corregí la columna **Cantidad** y verificá **Material Excel**. Si no reconocés el material por el nombre, usá **🖼️ Elegir material por su foto**, debajo de la tabla: podés buscar, mirar miniaturas y pulsar **Seleccionar POP**.')
+        st.markdown('**Revisá la foto**: verificá primero las cantidades **heredadas**, corregí la columna **Cantidad** y verificá **Material Excel**. Si no reconocés el material por el nombre, usá **🖼️ Elegir material por su foto**, debajo de la tabla: podés buscar, mirar miniaturas y pulsar **Seleccionar POP**.')
         # Edición en vivo: guarda el borrador en la sesión, sin aplicar al remito
         # hasta confirmar. Esto permite seleccionar imágenes SIN perder correcciones
         # realizadas en la misma tabla.
@@ -598,9 +605,11 @@ with page_ocr:
         edited=st.data_editor(pd.DataFrame(st.session_state[draft_key]),
             use_container_width=True,hide_index=True,key=editor_key,
             height=525,num_rows='dynamic',
-            column_order=['Página','Cantidad','Cantidad sugerida (verificar)','Descripción OCR',
+            column_order=['Página','Cantidad','Origen cantidad','Cantidad sugerida (verificar)','Descripción OCR',
                           'Material Excel','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa','Alertas del match','Otras opciones','Lectura','Ignorar'],
             column_config={
+                'Origen cantidad':st.column_config.TextColumn('Origen cantidad',
+                    help='Señala si la cifra estaba impresa o si se heredó de otro renglón. Verificá la foto.'),
                 'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d',
                    help='Cifra leída o corregida. Nunca se reemplaza automáticamente por la del Excel.'),
                 'Cantidad sugerida (verificar)':st.column_config.NumberColumn(
@@ -615,7 +624,7 @@ with page_ocr:
                 'Página':st.column_config.TextColumn('Página',width='medium'),
                 'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False)},
             disabled=['Página','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa',
-                      'Cantidad sugerida (verificar)','Alertas del match','Otras opciones','Lectura'])
+                      'Cantidad sugerida (verificar)','Origen cantidad','Alertas del match','Otras opciones','Lectura'])
         # Guardar en sesión también las cantidades recién editadas antes de abrir
         # el selector visual: el botón elige el POP sobre ESTA versión de la tabla.
         st.session_state[draft_key]=edited.to_dict('records')
@@ -728,7 +737,7 @@ with page_items:
     col1,col2,col3=st.columns([2,2,1])
     sheet=col1.selectbox('Hoja del Excel',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'filter_sheet_{period_key(view_period)}')
     status=col2.selectbox('Estado',['Todos','Diferencias y pendientes','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'filter_status_{period_key(view_period)}')
-    show_zero=col3.checkbox('Ver ceros Excel',value=False,key=f'filter_zero_{period_key(view_period)}')
+    show_zero=False
     display=[r for r in rows if (sheet=='Todas' or r['hoja']==sheet)
              and (show_zero or r['cantidad_excel']>0 or r['verificado'])
              and (status=='Todos' or (r['estado'] in ('Faltante','Sobrante','Pendiente')

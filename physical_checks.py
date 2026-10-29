@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from io import StringIO
 import csv
-from pop_core import integer_quantity, reconcile
+from pop_core import integer_quantity, reconcile, active_catalog
 
 
 def _now() -> str:
@@ -91,7 +91,7 @@ def reconciled_rows(period: dict, include_hidden: bool = True) -> list[dict]:
     completed = bool(period.get('is_complete', False))
     checks = period.get('physical_checks') or {}
     # Exactamente cuatro argumentos: compatible con la función antigua y nueva.
-    rows = reconcile(period['catalog'], quantities, completed, include_hidden)
+    rows = reconcile(active_catalog(period['catalog']), quantities, completed, include_hidden)
 
     for row in rows:
         material_id = row['id']

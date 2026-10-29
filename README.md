@@ -1,3 +1,20 @@
+# Actualización de OCR: lectura por posición (29/10/2026)
+
+Esta versión corrige el reconocimiento de los remitos fotografiados sin exigir fotos nuevas.
+
+- **Cantidad y descripción en una misma línea:** en lugar de depender solo del texto plano de Tesseract, utiliza las coordenadas de las palabras para reconstruir cada renglón. Evita que el número quede aislado y el material aparezca sin cantidad.
+- **Dos columnas independientes:** tanto en imágenes como en PDF digital, la reconstrucción se hace por columna. Las cantidades no se heredan de la columna opuesta.
+- **Dígitos dudosos:** un texto como `q 410 Sticker EDF` o `pe 6820 MINI CENEFA` conserva `410` o `6820` como **cantidad sugerida para verificar** y limpia la descripción para facilitar el match. Una cifra dudosa corta la herencia desde la fila anterior; no se acepta en silencio.
+- **Cantidad heredada:** si la fila no tiene número impreso, propone la última cifra explícita de esa misma columna/página. Indica el origen y exige revisión antes de cerrar el período.
+- **Match con DDV:** se consideran como catálogo operativo únicamente materiales con asignación positiva en la fila de Distribuidora del Valle. Se mantiene la búsqueda por equivalencias de campaña, marcas y medidas, y el aviso de materiales fuera de alcance.
+- **Fotografías:** la calidad del texto puede ser suficiente para una persona y aun así fallar OCR. Las lecturas dudosas siguen necesitando aprobación; el software no modifica el valor original del remito ni fuerza cantidades a coincidir con el Excel.
+
+### Reemplazo en GitHub
+
+Subí **todo el contenido de este ZIP** al repositorio de la aplicación y realizá Commit changes. Los cambios principales están en `ocr_core.py`, `ocr_layout.py` (nuevo), `pop_core.py` y `fuzzy_match.py`. Mantené el repositorio privado de datos y los Secrets tal como están; no los reemplaces. Después de desplegar, seleccioná Q3 para carga, volvé a procesar las imágenes y revisá las propuestas antes de pulsar «Aplicar revisión a este período». **Reprocesar no elimina el historial anterior salvo que confirmes un reemplazo.**
+
+---
+
 # NUEVO — Planilla visual de POP en la primera solapa «📊 Resumen»
 
 La pestaña inicial ahora muestra, **antes del gráfico y las tablas anteriores**, una
@@ -196,3 +213,12 @@ Para leer fotos en local, instalá Tesseract OCR con idiomas `spa` y `eng`. En S
 - Se reforzó el tema de **fondo blanco y letras negras en listas desplegables**, incluidos los menús que Streamlit muestra fuera del contenedor principal (portales BaseWeb). No se requiere editar los secretos de GitHub.
 - **Para guardar definitivamente los cambios en el trimestre**, seguí utilizando el botón «Aplicar revisión a este período». Elegir una fotografía actualiza el borrador del OCR, no modifica las asignaciones del Excel.
 
+
+
+## Actualización: alcance DDV, alias y cantidad compartida
+
+- **Catálogo operativo**: solo columnas con cantidad positiva en la fila de Distribuidora del Valle. Q3: 73 materiales y 95.590 unidades. El catálogo de origen completo permanece en los respaldos para auditoría. No se aplica un filtro literal por palabra `PATAGONIA` porque algunos materiales genéricos compartidos tienen cantidad asignada a DDV sin llevar esa palabra en el título.
+- **Nombres comerciales**: `AO` se reconoce como Andes Origen Oro. Los AFICHES de oferta `REG VARIAS` pueden coincidir con referencias DDV positivas del grupo genérico compartido en Q3. Si dos modelos tienen igual nombre y medida se dejan para selección por fotografía.
+- **Cantidad compartida**: en líneas de material sin cifra expresa se copia provisionalmente la última cifra explícita de la misma columna/página OCR, mostrando `Origen cantidad`. Se debe revisar al aplicar la lectura; esta operación no equivale a un conteo físico. La cifra heredada no cruza páginas ni columnas.
+- **Fuera de asignación**: un material cuyo mejor match es una referencia con DDV=0, y con evidencia textual suficiente, se marca `Ignorar` por defecto en Lectura OCR, pero aparece en una lista de auditoría y se puede corregir. Por ejemplo, Q3 `Quilmes Mundial 20x30` figura con DDV=0 aunque el remito pueda mostrar 40 por continuidad.
+- **Datos previos**: no se borran remitos ni verificaciones almacenadas. El filtro se aplica a la visualización y conciliación, también para períodos recuperados. Para recalcular una foto ya procesada con la nueva regla de continuidad hay que volver a subirla como **Reemplazar cantidades anteriores**, no como remito adicional.

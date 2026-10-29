@@ -175,6 +175,15 @@ def catalog_from_excel(content: bytes):
     return catalog,issues,meta
 
 
+def active_catalog(catalog):
+    """Sólo materiales POP asignados con cantidad mayor a cero en la fila DDV.
+
+    El catálogo original se guarda sin modificar, para trazabilidad. No filtrar
+    por la palabra Patagonia: hay material regional compartido asignado a DDV.
+    """
+    return [c for c in catalog if (integer_quantity(c.get('cantidad_excel')) or 0) > 0]
+
+
 def qty_from_ocr(text):
     s=str(text or '').strip().replace(' ','')
     if not re.fullmatch(r'[0-9][0-9.,]{0,8}',s): return None
@@ -207,24 +216,52 @@ def _possible_material(detail):
 
 
 def parse_ocr_text(text: str, source: str, page_number: int=1):
-    """Conserva líneas reconocibles aunque el OCR pierda cifras o escriba letras mal."""
-    lines=[]
-    for line_number, raw in enumerate(text.splitlines(),1):
+    """Cantidad de cada línea; en blanco hereda la última cifra explícita.
+
+    Sólo se hereda dentro de ESTA llamada, que equivale a una columna/página
+    escaneada. Nunca se cruza el límite de columna, documento o página.
+    Las cifras heredadas quedan marcadas para confirmación humana.
+    """
+    lines=[];last_explicit=None;last_line=None
+    for line_number,raw in enumerate(text.splitlines(),1):
         line=re.sub(r'\s+',' ',raw).strip(' \t|:')
         if not line or len(line)<6:continue
-        # Conservar candidato alfanumérico como sugerencia, NUNCA validarlo como cantidad.
-        hit=re.match(r'^([0-9IOSBL|][0-9IOSBL|.,]{1,8})\s+(.+)$',line,re.IGNORECASE)
-        if hit:
-            qty,suspect=_ocr_leading_quantity(hit.group(1))
-            detail=hit.group(2).strip()
-        else:qty=None;suspect=None;detail=line
+        match=re.match(r'^([0-9IOSBL|][0-9IOSBL|.,]{1,8})\s+(.+)$',line,re.IGNORECASE)
+        if match:
+            qty,suspect=_ocr_leading_quantity(match.group(1))
+            detail=match.group(2).strip()
+        else:
+            # Cifras con letra de ruido previa: sugerir sin aceptar automáticamente.
+            dirty=re.match(r'^[A-Z]{1,3}\s*[;:,]?\s+([0-9][0-9.,]{1,7})\s+(.+)$',line,re.IGNORECASE)
+            if dirty:
+                qty=None;suspect=qty_from_ocr(dirty.group(1));detail=dirty.group(2).strip()
+            else:
+                qty=None;suspect=None;detail=line
         norm=normalize(detail)
         if len(norm)<7 or not _possible_material(detail):continue
         if 'CANT BULTOS' in norm or 'FIRMA' in norm:continue
+        inherited=False
+        if qty is not None:
+            last_explicit=qty;last_line=line_number
+            origin='Expresa en el remito'
+        elif suspect is not None:
+            # No heredar un número anterior sobre un renglón cuya cifra está
+            # presente pero el OCR no pudo interpretarla con seguridad.
+            last_explicit=None;last_line=None
+            origin='Cifra OCR dudosa: verificar fotografía'
+        elif last_explicit is not None:
+            qty=last_explicit;inherited=True
+            origin=f'Heredada de línea {last_line} en la misma columna/página: revisar'
+        else:
+            origin='Sin cantidad explícita ni antecedente'
         lines.append({'pagina':f'{source} · p.{page_number}', 'linea':line_number,
-                      'detalle':detail,'cantidad':qty,'cantidad_sugerida':suspect,'ocr':line,'id':'',
-                      'estado_ocr':'Cantidad detectada' if qty is not None else
-                      ('Cantidad OCR dudosa' if suspect is not None else 'Revisar cantidad')})
+            'detalle':detail,'cantidad':qty,'cantidad_sugerida':suspect,
+            'cantidad_heredada':inherited,'origen_cantidad':origin,
+            'linea_cantidad_origen':last_line if inherited else None,
+            'ocr':line,'id':'',
+            'estado_ocr':('Cantidad heredada · revisar' if inherited else
+                'Cantidad detectada' if qty is not None else
+                ('Cantidad OCR dudosa' if suspect is not None else 'Revisar cantidad'))})
     return lines
 
 
@@ -232,6 +269,37 @@ def suggest_matches(ocr_rows, catalog, aliases=None):
     """Usa similitud tolerante al OCR sin modificar cantidades del remito."""
     from fuzzy_match import suggest_matches as match
     return match(ocr_rows,catalog,aliases)
+
+
+def classify_out_of_scope(suggestions, full_catalog, aliases=None):
+    """Marca coincidencias claras contra POP con asignación DDV=0, auditables.
+
+    No descarta lecturas ambiguas ni modifica cantidades. Los registros fuera
+    de alcance quedan por defecto sin sumar a la recepción, visibles en OCR.
+    """
+    from fuzzy_match import rank_matches
+    active=active_catalog(full_catalog)
+    active_ids={c['id'] for c in active}
+    output=[]
+    for row0 in suggestions:
+        row=dict(row0)
+        row['fuera_ddv']=False;row['razon_fuera_ddv']=''
+        if not row.get('id'):
+            full=rank_matches(row.get('detalle',''),full_catalog,aliases)
+            positive=rank_matches(row.get('detalle',''),active,aliases)
+            if full:
+                best=full[0];active_score=positive[0]['score'] if positive else 0
+                if (best['id'] not in active_ids and best['score']>=86
+                    and best['score']-active_score>=12 and not best['flags']):
+                    source=next((c for c in full_catalog if c['id']==best['id']),None)
+                    if source and (integer_quantity(source.get('cantidad_excel')) or 0)==0:
+                        row['fuera_ddv']=True
+                        row['razon_fuera_ddv']=(f"DDV=0 para {source.get('hoja','')} · "
+                            f"{source.get('formato','')} · {source['id']}; "
+                            f"similitud {round(best['score'])}%")
+                        row['estado_match']='Fuera de asignación DDV · revisar'
+        output.append(row)
+    return output
 
 
 def reconcile(catalog, quantities, completed=False,include_hidden=True, physical_checks=None):

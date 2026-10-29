@@ -22,7 +22,7 @@ REPLACEMENTS = {
     'LATA':'LATA', 'LATONES':'LATON', 'LATON':'LATON',
     'BOT':'BOTELLA', 'CERVEZA':'',
     'REG':'REGIONES', 'VARIAS':'VARIAS', 'REGION':'REGIONES',
-    'OFERTA':'OFERTA', 'CANEFAS':'CENEFA',
+    'OFERTA':'OFERTA', 'CANEFAS':'CENEFA', 'AO':'ANDES ORIGEN ORO',
 }
 TYPE_MARKERS = {'AFICHE','CENEFA','STICKER','COLLARIN','BANNER','VINILO','WOBBLER',
                 'CARTEL','FLEJE','COMBO'}
@@ -78,6 +78,17 @@ def _variants(item,alias):
     # Variante con palabra «afiche» aunque el Excel solo diga «35x50».
     if re.search(r'\b(?:A3|35\s*X\s*50|50\s*X\s*70|20\s*X\s*30)\b',clean(fmt)):
         phrases.append(f'{sheet} {grp} AFICHE {fmt}')
+    # Denominaciones del remito: Andes = AO (Andes Origen Oro) del Excel.
+    if sheet.upper() == 'AO':
+        phrases += [f'ANDES ORIGEN ORO {grp} {fmt}', f'AFICHE ANDES {fmt}',
+                    f'ANDES {fmt}',f'ANDES ORO {fmt}']
+    # En Q3 el remito identifica como REG VARIAS a los AFICHES genéricos
+    # positivos DDV del grupo regional GBA/COSTA/... del Excel. Se usan alias
+    # de búsqueda, sin reescribir ni ocultar el encabezado original del Excel.
+    if clean(sheet).startswith('GENERICO LATON') and 'GBA' in clean(grp) and item.get('cantidad_excel',0)>0:
+        kind='LATON' if 'LATON' in clean(grp) else 'LITRO'
+        phrases += [f'AFICHE OFERTA {kind} {fmt} REG VARIAS',
+                    f'AFICHE OFERTA {kind} {fmt} REGIONES VARIAS']
     # Pasar SOLO alias completo o expresión del excel con material y grupo. Nunca el formato suelto.
     unique=[]
     for p in phrases:

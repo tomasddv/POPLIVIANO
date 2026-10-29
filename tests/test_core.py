@@ -20,10 +20,11 @@ class AppTests(unittest.TestCase):
         rows=reconcile(self.catalog,{'Bud::G':215,'Bud::J':150},completed=True)
         self.assertEqual(rows[0]['estado'],'Sobrante')
         self.assertEqual(rows[0]['diferencia'],15)
-    def test_ocr_missing_qty_kept(self):
+    def test_ocr_missing_qty_inherits(self):
         rows=parse_ocr_text('280 AFICHE 20x30 COMBO\nAFICHE A3 STELLA\nFECHA:', 'remito.jpg')
         self.assertEqual(len(rows),2)
-        self.assertIsNone(rows[1]['cantidad'])
+        self.assertEqual(rows[1]['cantidad'],280)
+        self.assertTrue(rows[1]['cantidad_heredada'])
     def test_never_match_only_by_quantity(self):
         rows=suggest_matches([{'detalle':'Sticker Corona','cantidad':200}],self.catalog)
         self.assertEqual(rows[0]['id'],'')

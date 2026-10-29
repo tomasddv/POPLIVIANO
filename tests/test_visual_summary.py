@@ -26,7 +26,7 @@ class VisualSummaryTests(unittest.TestCase):
 
     def test_filters_sheet_search_and_status(self):
         self.assertEqual(len(filter_visual_rows(self.rows,self.aliases)),2)
-        self.assertEqual(len(filter_visual_rows(self.rows,self.aliases,include_zero=True)),3)
+        self.assertEqual(len(filter_visual_rows(self.rows,self.aliases,include_zero=True)),2)
         self.assertEqual([r['id'] for r in filter_visual_rows(self.rows,self.aliases,sheet='Oferta')],['Oferta::A'])
         self.assertEqual(len(filter_visual_rows(self.rows,self.aliases,status='Pendientes y diferencias')),2)
         self.assertEqual([r['id'] for r in filter_visual_rows(self.rows,self.aliases,query='cenefa')],['Brahma::B'])
@@ -68,11 +68,11 @@ class VisualSummaryTests(unittest.TestCase):
         p=empty_period();p.update(baseline)
         rows=reconciled_rows(p)
         selected=filter_visual_rows(rows,p.get('aliases',{}))
-        self.assertEqual(len(rows),100)
+        self.assertEqual(len(rows),73)
         self.assertTrue(len(selected)>0)
         self.assertEqual(selected[0]['hoja'],baseline['catalog'][0]['hoja'])
         images=json.loads((ROOT/'data/q3_pop_map.json').read_text(encoding='utf-8'))
         self.assertGreaterEqual(sum(x['id'] in images for x in selected),70)
-        self.assertEqual(len(filter_visual_rows(rows,p.get('aliases',{}),include_zero=True)),100)
+        self.assertEqual(len(filter_visual_rows(rows,p.get('aliases',{}),include_zero=True)),73)
 
 if __name__=='__main__':unittest.main()

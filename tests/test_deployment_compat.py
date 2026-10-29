@@ -58,7 +58,7 @@ class DeploymentCompatibilityTests(unittest.TestCase):
         q3 = empty_period()
         q3.update(baseline)
         rows = reconciled_rows(q3)
-        self.assertEqual(len(rows), 100)
+        self.assertEqual(len(rows), 73)
         self.assertEqual(metrics(rows)['asignado'], 95590)
 
 

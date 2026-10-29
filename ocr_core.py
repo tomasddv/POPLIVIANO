@@ -7,6 +7,7 @@ import re
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import pytesseract
 from pop_core import parse_ocr_text
+from ocr_layout import spatial_lines
 
 
 @dataclass
@@ -36,7 +37,8 @@ def _preprocess(image):
 
 def _read_photo(img, two_columns=True, split=0.50):
     W,H=img.size
-    # Remitos GS: 2 columnas de materiales; OCR completo mezcla cantidades de una con texto de otra.
+    # Los remitos GS tienen dos bloques de POP, cada uno con columna de
+    # cantidad y descripción. El OCR por página completa mezcla ambos.
     if two_columns:
         overlap=max(4,int(W*.018))
         boundary=int(W*split)
@@ -46,8 +48,49 @@ def _read_photo(img, two_columns=True, split=0.50):
     texts=[]
     for label, crop in parts:
         processed=_preprocess(crop)
-        txt=pytesseract.image_to_string(processed,lang='spa+eng',config='--oem 3 --psm 6')
-        texts.append((label,txt))
+        # image_to_data conserva coordenadas. Es fundamental cuando Tesseract
+        # ubica la cantidad y el material en bloques de texto diferentes.
+        data=pytesseract.image_to_data(processed,lang='spa+eng',
+                     config='--oem 3 --psm 6',output_type=pytesseract.Output.DICT)
+        located=spatial_lines(data)
+        spatial_text='\n'.join(line['text'] for line in located)
+        parsed=parse_ocr_text(spatial_text,label)
+        # En fotografías difíciles, la lectura plana puede captar palabras
+        # omitidas por reconstrucción espacial. Usarla solo si es mejor.
+        if len(parsed)<4:
+            fallback=pytesseract.image_to_string(processed,lang='spa+eng',config='--oem 3 --psm 6')
+            if len(parse_ocr_text(fallback,label))>len(parsed):
+                spatial_text=fallback
+        texts.append((label,spatial_text))
+    return texts
+
+
+def _native_pdf_texts(page, two_columns=True, split=.5):
+    """Extrae texto PDF digital separado por coordenada, sin mezclar bloques."""
+    words=page.get_text('words')
+    if not words:return []
+    width=float(page.rect.width)
+    boundary=width*split
+    labels=['Columna izquierda','Columna derecha'] if two_columns else ['Página completa']
+    grouped={name:[] for name in labels}
+    for entry in words:
+        if len(entry)<5:continue
+        x0,y0,x1,y1,value=entry[:5]
+        xcentre=(x0+x1)/2
+        label=('Columna izquierda' if xcentre < boundary else 'Columna derecha') if two_columns else labels[0]
+        grouped[label].append((x0,y0,x1,y1,str(value)))
+    texts=[]
+    for label in labels:
+        source=grouped[label]
+        if not source:continue
+        data={k:[] for k in ('text','left','top','width','height','conf')}
+        for x0,y0,x1,y1,value in source:
+            for key,value0 in (('text',value),('left',round(x0*3)),('top',round(y0*3)),
+                                ('width',max(1,round((x1-x0)*3))),
+                                ('height',max(1,round((y1-y0)*3))),('conf',100)):
+                data[key].append(value0)
+        text='\n'.join(t['text'] for t in spatial_lines(data))
+        texts.append((label,text))
     return texts
 
 
@@ -64,11 +107,16 @@ def read_documents(files: list[tuple[str,bytes]],two_columns=True,split=.50,max_
             for page_id in range(pages):
                 page=doc[page_id];total_pages+=1
                 extracted=page.get_text(sort=True).strip()
-                # PDF digital: usar texto nativo si contiene cantidades y materiales. De otro modo OCR.
-                detected=parse_ocr_text(extracted,name,page_id+1) if extracted else []
-                if len(detected)>=4:
-                    out.extend(detected)
-                    raw.append(f'### {name}, página {page_id+1} · PDF texto\n{extracted}')
+                # PDF digital: separar espacialmente las dos columnas también
+                # aquí, para no heredar cantidades de la columna contraria.
+                digital_parts=_native_pdf_texts(page,two_columns,split) if extracted else []
+                native_rows=[]
+                for label,txt in digital_parts:
+                    native_rows.extend(parse_ocr_text(txt,f'{name}, página {page_id+1} ({label})',page_id+1))
+                if len(native_rows)>=4:
+                    out.extend(native_rows)
+                    for label,txt in digital_parts:
+                        raw.append(f'### {name}, página {page_id+1} · PDF texto / {label}\n{txt}')
                 else:
                     pix=page.get_pixmap(matrix=fitz.Matrix(2.0,2.0),alpha=False)
                     img=_normalize_image(Image.open(BytesIO(pix.tobytes('png'))))
