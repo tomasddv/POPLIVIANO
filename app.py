@@ -22,7 +22,7 @@ from media_core import extract_pop_images, make_scan_previews, image_jpeg
 from persistence import make_store, read_zip_assets, write_zip_assets, StorageError
 from physical_checks import (approve_material, undo_material, invalidate_changed_checks,
                              clear_checks, reconciled_rows, metrics, to_csv)
-from visual_match import visual_candidates, preferred_ocr_ids, choose_material
+from visual_match import visual_candidates, preferred_ocr_ids, choose_material, pending_ocr_indices
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown("""<style>
@@ -51,6 +51,64 @@ html, body, .stApp, [data-testid="stAppViewContainer"],
 .stButton > button[kind="primary"]:hover,button[data-testid="stBaseButton-primary"]:hover {
  background:#B9DBFF!important;color:#000!important;
 }
+
+/* Streamlit monta los desplegables en portales FUERA de .stApp.
+   Forzar el fondo de TODOS los niveles del menú evita texto negro sobre negro,
+   incluso si el navegador/tema trae estilos oscuros de BaseWeb. */
+[data-baseweb="popover"],
+[data-baseweb="popover"] > div,
+[data-baseweb="popover"] [data-baseweb="menu"],
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] li,
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="popover"] [role="option"],
+[data-baseweb="menu"],
+[role="listbox"],
+[role="option"],
+[role="listbox"] > div {
+  background-color:#FFFFFF !important;
+  background:#FFFFFF !important;
+  color:#000000 !important;
+  -webkit-text-fill-color:#000000 !important;
+  color-scheme:light !important;
+}
+/* Algunos menús BaseWeb crean divs interiores con fondo oscuro propio. */
+[data-baseweb="popover"] :is(div,span,p,small,li),
+[data-baseweb="menu"] :is(div,span,p,small,li),
+[role="listbox"] :is(div,span,p,small,li),
+[role="option"] :is(div,span,p,small) {
+  color:#000000 !important;
+  -webkit-text-fill-color:#000000 !important;
+  background-color:transparent !important;
+}
+[data-baseweb="popover"] [role="option"]:hover,
+[data-baseweb="popover"] [role="option"][aria-selected="true"],
+[data-baseweb="menu"] [role="option"]:hover,
+[role="option"]:hover,
+[role="option"][aria-selected="true"],
+[role="listbox"] li:hover {background-color:#DDEBFA !important;}
+[data-baseweb="popover"] input,
+[data-baseweb="popover"] input::placeholder,
+[data-baseweb="select"] input,
+[data-baseweb="select"] * {
+  color:#000000 !important;
+  -webkit-text-fill-color:#000000 !important;
+}
+[data-baseweb="select"] > div,
+[data-baseweb="select"] [aria-expanded],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  background:#FFFFFF !important;
+  color-scheme:light !important;
+}
+/* El selector y la barra lateral también deben contrastar con la letra negra. */
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stExpander"] [data-baseweb="select"] > div,
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] details {
+  background:#FFFFFF !important;
+  color:#000000 !important;
+}
+
 /* Fichas con control físico confirmado: fondo, borde y botón verdes. */
 [class*="st-key-pop_fisico_aprobado_"] {background:#DCFCE7!important; border:2px solid #16A34A!important; border-radius:12px; padding:8px;}
 [class*="st-key-pop_boton_aprobado_"] button {
@@ -522,63 +580,70 @@ with page_ocr:
         with st.expander('🖼️ Elegir material por su foto (selector visual de Material Excel)',expanded=True):
             draft=st.session_state[draft_key]
             if draft:
-                pending_rows=[i for i,r in enumerate(draft)
-                              if str(r.get('Material Excel',''))=='(sin asignar)']
-                current_row=st.selectbox(
-                    '1 · Seleccioná la fila del remito que querés relacionar con un POP',
-                    range(len(draft)),
-                    index=pending_rows[0] if pending_rows else 0,
-                    format_func=lambda i: f"Fila {i+1} · {str(draft[i].get('Descripción OCR') or 'Sin descripción')[:75]} · "
-                                          f"Cantidad: {draft[i].get('Cantidad') if integer_quantity(draft[i].get('Cantidad')) is not None else 'sin verificar'}",
-                    key=f'visual_ocr_row_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}')
-                selected_ocr=draft[current_row]
-                st.caption('OCR detectó: '+str(selected_ocr.get('Descripción OCR') or 'Sin descripción')+
-                           ' · Material elegido: '+str(selected_ocr.get('Material Excel') or '(sin asignar)'))
-                filter1,filter2,filter3=st.columns([3,2,1.2])
-                search_query=filter1.text_input('2 · Buscar material por nombre o tamaño',placeholder='Ej.: afiche 20x30, Brahma, Stella',
-                    key=f'visual_search_{period_key(view_period)}_{p["ocr_version"]}')
-                filter_sheet=filter2.selectbox('Hoja / marca', ['Todas']+sorted(set(c['hoja'] for c in catalog)),
-                    key=f'visual_sheet_{period_key(view_period)}_{p["ocr_version"]}')
-                photos_only=filter3.checkbox('Solo con foto',value=False,
-                    key=f'visual_photos_{period_key(view_period)}_{p["ocr_version"]}')
-                image_map=p.get('pop_images',{})
-                image_assets=st.session_state.pop_assets.get(view_period,{})
-                original_ocr=p['ocr_rows'][current_row] if current_row<len(p['ocr_rows']) else {}
-                preferred=preferred_ocr_ids(original_ocr)
-                candidates=visual_candidates(catalog,p['aliases'],search_query,filter_sheet,
-                    preferred,photos_only,image_map,image_assets)
-                st.caption(f'3 · Tocá **Seleccionar POP** debajo de su imagen. '
-                           f'Hay {len(candidates)} materiales disponibles; se muestran primero los sugeridos por el OCR.')
-                if candidates:
-                    per_page=12
-                    page_total=max(1,math.ceil(len(candidates)/per_page))
-                    pager_key=f'visual_page_{period_key(view_period)}_{p["ocr_version"]}'
-                    if st.session_state.get(pager_key,1)>page_total:st.session_state[pager_key]=page_total
-                    page_no=st.number_input('Página de fotos',min_value=1,max_value=page_total,
-                        value=1,step=1,key=pager_key)
-                    visible=candidates[(int(page_no)-1)*per_page:int(page_no)*per_page]
-                    for start in range(0,len(visible),3):
-                        columns=st.columns(3)
-                        for column,c in zip(columns,visible[start:start+3]):
-                            with column:
-                                cid=c['id']
-                                is_selected=selected_ocr.get('Material Excel')==names[cid]
-                                with st.container(border=True):
-                                    picture=image_assets.get(image_map.get(cid,''))
-                                    if picture:st.image(picture,use_container_width=True)
-                                    else:st.caption('🖼️ Este POP no tiene foto vinculada')
-                                    st.markdown('**'+str(p['aliases'].get(cid) or c['formato'])+'**')
-                                    st.caption(f"{c['hoja']} · {cid} · Excel DDV: {pretty(c['cantidad_excel'])}")
-                                    if cid in preferred:st.caption('⭐ Material sugerido por OCR')
-                                    if is_selected:st.success('✓ Seleccionado para esta fila')
-                                    if st.button('✓ Seleccionar POP',key=f'visual_pick_{period_key(view_period)}_{p["ocr_version"]}_{current_row}_{sha256(cid.encode()).hexdigest()[:12]}',
-                                                 use_container_width=True,disabled=is_selected):
-                                        st.session_state[draft_key]=choose_material(
-                                            st.session_state[draft_key],current_row,cid,names,catalog)
-                                        st.session_state[editor_rev_key]+=1
-                                        st.rerun()
+                pending_rows=pending_ocr_indices(draft)
+                st.caption(f'**{len(pending_rows)} filas pendientes de asignación** · '
+                           'Las filas desaparecen del selector apenas elegís su POP. '
+                           'Si querés revisar o cambiar una ya asignada, usá la tabla de arriba.')
+                if pending_rows:
+                    # La firma cambia cuando desaparece una fila: evita conservar
+                    # una selección obsoleta en el widget tras un rerun de Streamlit.
+                    pending_signature=sha256(','.join(map(str,pending_rows)).encode('utf-8')).hexdigest()[:12]
+                    current_row=st.selectbox(
+                        '1 · Elegí solo una fila SIN ASIGNAR del remito',
+                        pending_rows,
+                        format_func=lambda i: f"Fila {i+1} · {str(draft[i].get('Descripción OCR') or 'Sin descripción')[:75]} · "
+                                              f"Cantidad: {draft[i].get('Cantidad') if integer_quantity(draft[i].get('Cantidad')) is not None else 'sin verificar'}",
+                        key=f'visual_ocr_row_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}_{pending_signature}')
+                    selected_ocr=draft[current_row]
+                    st.caption('OCR detectó: '+str(selected_ocr.get('Descripción OCR') or 'Sin descripción')+
+                               ' · Material elegido: '+str(selected_ocr.get('Material Excel') or '(sin asignar)'))
+                    filter1,filter2,filter3=st.columns([3,2,1.2])
+                    search_query=filter1.text_input('2 · Buscar material por nombre o tamaño',placeholder='Ej.: afiche 20x30, Brahma, Stella',
+                        key=f'visual_search_{period_key(view_period)}_{p["ocr_version"]}')
+                    filter_sheet=filter2.selectbox('Hoja / marca', ['Todas']+sorted(set(c['hoja'] for c in catalog)),
+                        key=f'visual_sheet_{period_key(view_period)}_{p["ocr_version"]}')
+                    photos_only=filter3.checkbox('Solo con foto',value=False,
+                        key=f'visual_photos_{period_key(view_period)}_{p["ocr_version"]}')
+                    image_map=p.get('pop_images',{})
+                    image_assets=st.session_state.pop_assets.get(view_period,{})
+                    original_ocr=p['ocr_rows'][current_row] if current_row<len(p['ocr_rows']) else {}
+                    preferred=preferred_ocr_ids(original_ocr)
+                    candidates=visual_candidates(catalog,p['aliases'],search_query,filter_sheet,
+                        preferred,photos_only,image_map,image_assets)
+                    st.caption(f'3 · Tocá **Seleccionar POP** debajo de su imagen. '
+                               f'Hay {len(candidates)} materiales disponibles; se muestran primero los sugeridos por el OCR.')
+                    if candidates:
+                        per_page=12
+                        page_total=max(1,math.ceil(len(candidates)/per_page))
+                        pager_key=f'visual_page_{period_key(view_period)}_{p["ocr_version"]}'
+                        if st.session_state.get(pager_key,1)>page_total:st.session_state[pager_key]=page_total
+                        page_no=st.number_input('Página de fotos',min_value=1,max_value=page_total,
+                            value=1,step=1,key=pager_key)
+                        visible=candidates[(int(page_no)-1)*per_page:int(page_no)*per_page]
+                        for start in range(0,len(visible),3):
+                            columns=st.columns(3)
+                            for column,c in zip(columns,visible[start:start+3]):
+                                with column:
+                                    cid=c['id']
+                                    is_selected=selected_ocr.get('Material Excel')==names[cid]
+                                    with st.container(border=True):
+                                        picture=image_assets.get(image_map.get(cid,''))
+                                        if picture:st.image(picture,use_container_width=True)
+                                        else:st.caption('🖼️ Este POP no tiene foto vinculada')
+                                        st.markdown('**'+str(p['aliases'].get(cid) or c['formato'])+'**')
+                                        st.caption(f"{c['hoja']} · {cid} · Excel DDV: {pretty(c['cantidad_excel'])}")
+                                        if cid in preferred:st.caption('⭐ Material sugerido por OCR')
+                                        if is_selected:st.success('✓ Seleccionado para esta fila')
+                                        if st.button('✓ Seleccionar POP',key=f'visual_pick_{period_key(view_period)}_{p["ocr_version"]}_{current_row}_{sha256(cid.encode()).hexdigest()[:12]}',
+                                                     use_container_width=True,disabled=is_selected):
+                                            st.session_state[draft_key]=choose_material(
+                                                st.session_state[draft_key],current_row,cid,names,catalog)
+                                            st.session_state[editor_rev_key]+=1
+                                            st.rerun()
+                    else:
+                        st.info('No hay materiales que cumplan ese filtro. Probá buscar menos palabras o desactivar «Solo con foto».')
                 else:
-                    st.info('No hay materiales que cumplan ese filtro. Probá buscar menos palabras o desactivar «Solo con foto».')
+                    st.success('✅ No quedan renglones sin asignar. Todos los POP identificados se mantienen en la tabla de revisión.')
             else:
                 st.warning('No hay filas OCR para seleccionar.')
         submitted=st.button('✅ Aplicar revisión a este período',type='primary',use_container_width=True,

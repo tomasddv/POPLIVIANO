@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from visual_match import visual_candidates, preferred_ocr_ids, choose_material
+from visual_match import visual_candidates, preferred_ocr_ids, choose_material, pending_ocr_indices
 
 CATALOG=[
     {'id':'Oferta::G','hoja':'Oferta','formato':'AFICHE 20X30 OFERTA','material':'Oferta · AFICHE 20X30 OFERTA','grupo':'Oferta','cantidad_excel':350},
@@ -11,6 +11,31 @@ CATALOG=[
 ]
 NAMES={x['id']:x['id']+' | '+x['material'] for x in CATALOG}
 class VisualMatchTests(unittest.TestCase):
+    def test_only_pending_rows_are_listed(self):
+        rows=[
+          {'Material Excel':'(sin asignar)','Descripción OCR':'sin identificar'},
+          {'Material Excel':NAMES['Oferta::G'],'Descripción OCR':'ya sugerido'},
+          {'Material Excel':None,'Descripción OCR':'sin detectar'},
+          {'Material Excel':'','Descripción OCR':'vacío'},
+          {'Material Excel':'—','Descripción OCR':'guion'},
+          {'Material Excel':'(sin asignar)','Ignorar':True},
+        ]
+        self.assertEqual(pending_ocr_indices(rows),[0,2,3,4])
+
+    def test_selected_row_disappears_and_others_remain(self):
+        rows=[{'Material Excel':'(sin asignar)','Cantidad':350},
+              {'Material Excel':'(sin asignar)','Cantidad':200},
+              {'Material Excel':NAMES['Oferta::H'],'Cantidad':2840}]
+        self.assertEqual(pending_ocr_indices(rows),[0,1])
+        updated=choose_material(rows,0,'Oferta::G',NAMES,CATALOG)
+        self.assertEqual(pending_ocr_indices(updated),[1])
+        self.assertEqual(pending_ocr_indices(rows),[0,1])
+        self.assertEqual(updated[0]['Cantidad'],350)
+        updated=choose_material(updated,1,'Brahma::K',NAMES,CATALOG)
+        self.assertEqual(pending_ocr_indices(updated),[])
+        updated[0]['Material Excel']='(sin asignar)'
+        self.assertEqual(pending_ocr_indices(updated),[0])
+
     def test_prefers_suggested_excel_match(self):
         selected=visual_candidates(CATALOG,{},preferred=['Brahma::K'])
         self.assertEqual(selected[0]['id'],'Brahma::K')

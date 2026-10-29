@@ -38,6 +38,24 @@ def visual_candidates(catalog, aliases, query='', sheet='Todas', preferred=(),
     return result
 
 
+def pending_ocr_indices(rows):
+    """Devuelve solo filas sin POP identificado y que no fueron ignoradas.
+
+    Se recalcula después de elegir una foto y después de cada edición de tabla.
+    Las filas previamente asociadas (manualmente o por OCR) no se muestran,
+    aunque permanecen editables en la tabla OCR general.
+    """
+    blank_labels = {'', '(sin asignar)', 'sin asignar', '—', '-', 'none', 'nan'}
+    result = []
+    for index, row in enumerate(rows):
+        if bool(row.get('Ignorar', False)):
+            continue
+        assigned = str(row.get('Material Excel') or '').strip().casefold()
+        if assigned in blank_labels:
+            result.append(index)
+    return result
+
+
 def preferred_ocr_ids(ocr_row):
     """Sugerencia principal y alternativas reconocidas, sin duplicados."""
     if not isinstance(ocr_row,dict):

@@ -153,3 +153,12 @@ python -m streamlit run app.py
 ```
 
 Para leer fotos en local, instalá Tesseract OCR con idiomas `spa` y `eng`. En Streamlit Cloud lo solicita `packages.txt`.
+
+## Actualización: selector visual solo con filas sin asignar y contraste corregido
+
+- El desplegable **«1 · Elegí solo una fila SIN ASIGNAR del remito»** incluye únicamente filas OCR sin material elegido y no marcadas como «Ignorar». Las filas que ya tienen Material Excel asociado quedan fuera de esta lista.
+- Al presionar **«✓ Seleccionar POP»** debajo de una imagen, el renglón desaparece inmediatamente del desplegable y se selecciona otra fila pendiente; el OCR y la cantidad original quedan intactos.
+- Cuando no quedan pendientes, aparece un mensaje verde y la tabla principal sigue mostrando todas las filas para revisiones o correcciones. Si una fila vuelve a «(sin asignar)» en la tabla, reaparece en la lista.
+- Se reforzó el tema de **fondo blanco y letras negras en listas desplegables**, incluidos los menús que Streamlit muestra fuera del contenedor principal (portales BaseWeb). No se requiere editar los secretos de GitHub.
+- **Para guardar definitivamente los cambios en el trimestre**, seguí utilizando el botón «Aplicar revisión a este período». Elegir una fotografía actualiza el borrador del OCR, no modifica las asignaciones del Excel.
+
