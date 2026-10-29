@@ -18,19 +18,26 @@ from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantiti
                           new_source, restore_archive)
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
-st.markdown('''<style>
-.stApp{background:#F4F7FC}
+st.markdown("""<style>
+/* Paleta clara y legible, también en la barra lateral y en widgets BaseWeb. */
+.stApp, [data-testid="stAppViewContainer"]{background-color:#F4F7FC;color:#172A42}
+[data-testid="stSidebar"]{background-color:#FFFFFF;border-right:1px solid #DEE6EF}
+[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,[data-testid="stSidebar"] small,
+[data-testid="stSidebar"] .stCaption{color:#172A42}
 h1,h2,h3{letter-spacing:-.025em;color:#142B4C}
-[data-testid="stMetric"]{background:#fff;border:1px solid #DDE5F0;border-radius:13px;padding:13px 18px}
+[data-testid="stMetric"]{background:#FFFFFF;border:1px solid #DDE5F0;border-radius:13px;padding:13px 18px}
 [data-testid="stMetricLabel"]{color:#536781;font-weight:600}
 [data-testid="stMetricValue"]{color:#153962}
-[data-testid="stSidebar"]{background:#13263F}
-[data-testid="stSidebar"] *{color:#EAF1F8}
-[data-testid="stSidebar"] button{color:#18304D}
-[data-testid="stSidebar"] input{color:#18304D!important}
 .stTabs [data-baseweb="tab"]{padding:9px 15px}
-div.stButton > button[kind="primary"]{background:#1769D2;border-radius:9px}
-</style>''',unsafe_allow_html=True)
+[data-testid="stDataFrame"], [data-testid="stDataEditor"]{background:#FFFFFF}
+.stButton > button[kind="primary"],button[data-testid="stBaseButton-primary"]{
+ background:#1769D2;color:#FFFFFF;border-radius:9px;border-color:#1769D2}
+.stButton > button[kind="primary"]:hover,button[data-testid="stBaseButton-primary"]:hover{
+ background:#1057B4;color:#FFFFFF}
+/* No usar selectores globales * que heredaban blanco en cuadros blancos. */
+</style>""",unsafe_allow_html=True)
 
 
 def pretty(value):
@@ -52,15 +59,34 @@ def now_label():
 
 def make_ocr_table(p, names):
     if p.get('ocr_edited_rows') is not None:
-        return p['ocr_edited_rows']
-    return [
-        {'Página':x.get('pagina',''), 'Cantidad':x.get('cantidad'),
-         'Descripción OCR':x.get('detalle',''),
-         'Material Excel':names.get(x.get('id',''),'(sin asignar)'),
-         'Sugerencia':names.get(x.get('sugerido',''),'—'),
-         'Lectura':x.get('estado_match',''), 'Ignorar':False}
-        for x in p['ocr_rows']
-    ]
+        # Compatibilidad con respaldos JSON anteriores, cuyas tablas no tenían
+        # similitud, alertas ni la nueva columna de cantidad OCR sugerida.
+        defaults={'Cantidad sugerida (verificar)':None,'Similitud %':None,
+                  'Excel sugerido':None,'Diferencia tentativa':None,
+                  'Otras opciones':'','Alertas del match':'', 'Ignorar':False}
+        return [{**defaults,**row} for row in p['ocr_edited_rows']]
+    table=[]
+    for x in p['ocr_rows']:
+        suggestions=x.get('alternativas',[])
+        options=' · '.join(f"{names.get(a['id'],a['id']).split(' | ',1)[-1][:32]} ({round(a['score'])}%)"
+                           for a in suggestions[1:3])
+        qty=x.get('cantidad')
+        excel_qty=x.get('cantidad_excel_sugerida')
+        table.append({
+            'Página':x.get('pagina',''),
+            'Cantidad':qty,
+            'Cantidad sugerida (verificar)':x.get('cantidad_sugerida'),
+            'Descripción OCR':x.get('detalle',''),
+            'Material Excel':names.get(x.get('id',''),'(sin asignar)'),
+            'Sugerencia':names.get(x.get('sugerido',''),'—'),
+            'Similitud %':x.get('puntaje',0),
+            'Excel sugerido':excel_qty,
+            'Diferencia tentativa': (qty-excel_qty) if qty is not None and excel_qty is not None else None,
+            'Otras opciones':options,
+            'Alertas del match':' / '.join(x.get('alertas_match',[])),
+            'Lectura':x.get('estado_match',''),
+            'Ignorar':False})
+    return table
 
 
 def confirm_ocr_rows(edited, catalog_ids):
@@ -254,7 +280,7 @@ with page_summary:
                                    marker_color=color,orientation='h'))
         chart.update_layout(barmode='group',height=max(350,40*len(ordered)+110),
                             margin=dict(l=10,r=8,t=6,b=18),legend=dict(orientation='h',y=1.07),
-                            plot_bgcolor='#fff',paper_bgcolor='#fff',yaxis=dict(autorange='reversed'),
+                            plot_bgcolor='#fff',paper_bgcolor='#fff',font=dict(color='#172A42'),yaxis=dict(autorange='reversed'),
                             xaxis=dict(title='Unidades',gridcolor='#E7EDF4'))
         st.plotly_chart(chart,use_container_width=True,config={'displayModeBar':False})
     cc,dd=st.columns(2)
@@ -286,7 +312,7 @@ with page_summary:
 
 with page_ocr:
     st.subheader(f'Leer y revisar fotos · {view_period}')
-    st.caption('Cargá las imágenes del período desde el panel izquierdo. Las coincidencias automáticas son propuestas, no validaciones definitivas.')
+    st.caption('El nombre se compara de forma flexible (errores de letras y cifras del nombre), pero las CANTIDADES se comparan exactamente. Toda sugerencia debe revisarse.')
     for warning in p['ocr_warnings']:st.warning(warning)
     if not p['ocr_rows']:
         st.info('Este trimestre no tiene una extracción OCR editable. Podés subir una imagen nueva y ejecutar «Leer remito para este período».')
@@ -294,22 +320,32 @@ with page_ocr:
         ocr=p['ocr_rows']
         q1,q2,q3=st.columns(3)
         q1.metric('Renglones OCR',len(ocr));q2.metric('Con cantidad',sum(x.get('cantidad') is not None for x in ocr))
-        q3.metric('Con propuesta',sum(bool(x.get('sugerido')) for x in ocr))
+        q3.metric('Con material sugerido',sum(bool(x.get('sugerido')) for x in ocr))
+        st.info('**Reconocimiento flexible:** tolera letras o números mal leídos en la descripción. Revisá las sugerencias de similitud baja, los formatos dudosos y cualquier diferencia de cantidad; no se corrigen cantidades para hacerlas coincidir.')
         st.caption(f'Acción seleccionada para esta lectura: **{p["ocr_operation"]}**. Reaplicar la misma tabla no suma dos veces los materiales.')
-        st.markdown('Corregí las cifras y elegí el material correcto. Si el OCR confundió dos conceptos, dejalos pendientes hasta identificarlos.')
+        st.markdown('**Revisá la foto**: corregí la columna **Cantidad** y verificá **Material Excel**. La columna **Cantidad sugerida** es solo una pista: nunca se aplica sola. Para dudas, revisá **Alertas del match** y **Otras opciones**.')
         table=make_ocr_table(p,names)
         with st.form(f'ocr_form_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}'):
             edited=st.data_editor(pd.DataFrame(table),use_container_width=True,hide_index=True,
                 height=525,num_rows='dynamic',
-                column_order=['Página','Cantidad','Descripción OCR','Material Excel','Sugerencia','Lectura','Ignorar'],
+                column_order=['Página','Cantidad','Cantidad sugerida (verificar)','Descripción OCR',
+                              'Material Excel','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa','Alertas del match','Otras opciones','Lectura','Ignorar'],
                 column_config={
-                    'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d'),
+                    'Cantidad':st.column_config.NumberColumn('Cantidad',min_value=0,step=1,format='%d',
+                       help='Cifra leída o corregida. Nunca se reemplaza automáticamente por la del Excel.'),
+                    'Cantidad sugerida (verificar)':st.column_config.NumberColumn(
+                       'Cifra OCR dudosa',format='%d',help='El OCR confundió caracteres como S y 5. Revisá la foto y escribí la cifra confirmada en Cantidad.'),
+                    'Similitud %':st.column_config.NumberColumn('Similitud %',format='%d%%',
+                       help='Puntaje aproximado de similitud de descripción, no de cantidad ni de recepción.'),
+                    'Excel sugerido':st.column_config.NumberColumn('Excel sugerido',format='%d'),
+                    'Diferencia tentativa':st.column_config.NumberColumn('Diferencia tentativa',format='%d'),
                     'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
                     'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=options,width='large'),
                     'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
                     'Página':st.column_config.TextColumn('Página',width='medium'),
                     'Ignorar':st.column_config.CheckboxColumn('Ignorar',default=False)},
-                disabled=['Página','Sugerencia','Lectura'])
+                disabled=['Página','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa',
+                          'Cantidad sugerida (verificar)','Alertas del match','Otras opciones','Lectura'])
             submitted=st.form_submit_button('✅ Aplicar revisión a este período',type='primary',use_container_width=True)
         if submitted:
             edited_rows=edited.to_dict('records')

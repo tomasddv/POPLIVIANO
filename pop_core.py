@@ -184,60 +184,54 @@ def qty_from_ocr(text):
     return int(digits)
 
 
+def _ocr_leading_quantity(token):
+    """Cantidad segura o candidata con letras confundidas; candidata requiere revisión."""
+    safe=qty_from_ocr(token)
+    if safe is not None:return safe,None
+    s=token.strip().upper().replace('.','').replace(',','')
+    if not re.fullmatch(r'[0-9OISBL\|]{2,7}',s) or not any(ch.isdigit() for ch in s):
+        return None,None
+    corrected=s.translate(str.maketrans({'O':'0','I':'1','S':'5','B':'8','L':'1','|':'1'}))
+    return None,int(corrected) if corrected.isdigit() else None
+
+
+def _possible_material(detail):
+    from rapidfuzz import fuzz
+    norm=normalize(detail)
+    if any(w in norm for w in DETAIL_WORDS):return True
+    if re.search(r'\b[0-9O]{1,2}\s*X\s*[0-9O]{1,2}\b',norm):return True
+    # El OCR puede cambiar 1 o 2 letras de AFICHE / CENEFA / STICKER.
+    words=norm.split()
+    return any(max(fuzz.ratio(t,w) for t in ('AFICHE','CENEFA','STICKER','COLLARIN','COMBO'))>=70
+               for w in words[:5])
+
+
 def parse_ocr_text(text: str, source: str, page_number: int=1):
-    """No descarta materiales si el OCR pierde la cantidad: quedan pendientes de revisión."""
+    """Conserva líneas reconocibles aunque el OCR pierda cifras o escriba letras mal."""
     lines=[]
     for line_number, raw in enumerate(text.splitlines(),1):
         line=re.sub(r'\s+',' ',raw).strip(' \t|:')
-        if not line or len(line)<6: continue
-        hit=re.match(r'^\s*([0-9][0-9.,]{0,8})\s+(.+)$',line)
+        if not line or len(line)<6:continue
+        # Conservar candidato alfanumérico como sugerencia, NUNCA validarlo como cantidad.
+        hit=re.match(r'^([0-9IOSBL|][0-9IOSBL|.,]{1,8})\s+(.+)$',line,re.IGNORECASE)
         if hit:
-            qty=qty_from_ocr(hit.group(1));detail=hit.group(2).strip()
-        else:qty=None;detail=line
+            qty,suspect=_ocr_leading_quantity(hit.group(1))
+            detail=hit.group(2).strip()
+        else:qty=None;suspect=None;detail=line
         norm=normalize(detail)
-        if len(norm)<8:continue
-        if not (any(word in norm for word in DETAIL_WORDS) or re.search(r'\b\d{1,2}\s*X\s*\d{1,2}\b',norm)):
-            continue
+        if len(norm)<7 or not _possible_material(detail):continue
         if 'CANT BULTOS' in norm or 'FIRMA' in norm:continue
         lines.append({'pagina':f'{source} · p.{page_number}', 'linea':line_number,
-                      'detalle':detail,'cantidad':qty,'ocr':line,'id':'',
-                      'estado_ocr':'Cantidad detectada' if qty is not None else 'Revisar cantidad'})
+                      'detalle':detail,'cantidad':qty,'cantidad_sugerida':suspect,'ocr':line,'id':'',
+                      'estado_ocr':'Cantidad detectada' if qty is not None else
+                      ('Cantidad OCR dudosa' if suspect is not None else 'Revisar cantidad')})
     return lines
 
 
-def _score(detail, source):
-    # «AFICHE A3» y «AS» (confusión habitual de OCR) reciben normalización.
-    q=normalize(detail).replace('AFICHE AS ','AFICHE A3 ')
-    s=normalize(source).replace('AFICHE AS ','AFICHE A3 ')
-    if not q or not s:return 0.0
-    # No usar la cantidad asignada para sugerir match: produciría confirmaciones circulares.
-    qa=set(q.split()); sa=set(s.split())
-    common=len(qa&sa); union=len(qa|sa)
-    j=common/union if union else 0
-    cover=common/max(1,min(len(qa),len(sa)))
-    similarity=SequenceMatcher(None,q,s).ratio()
-    return 100*(.32*j+.30*cover+.38*similarity)
-
-
-def suggest_matches(ocr_rows,catalog,aliases=None):
-    aliases=aliases or {}
-    # Si varias columnas tienen identidad indistinguible, nunca hacer enlace automático.
-    labels={m['id']:' '.join([m['material'],aliases.get(m['id'],'')]) for m in catalog}
-    candidates=[]
-    for r in ocr_rows:
-        ranked=sorted((( _score(r.get('detalle',''),label),ident) for ident,label in labels.items()),reverse=True)
-        next_row=dict(r)
-        score,id_=(ranked[0] if ranked else (0,''))
-        second=ranked[1][0] if len(ranked)>1 else 0
-        next_row['sugerido']=id_ if score>=42 else ''
-        next_row['puntaje']=round(score)
-        next_row['segunda_opcion']=round(second)
-        next_row['id']=id_ if score>=68 and score-second>=12 else ''
-        next_row['estado_match']='Automática: revisar' if next_row['id'] else ('Sugerencia ambigua' if score>=42 else 'Sin sugerencia')
-        candidates.append(next_row)
-    # Más de una fila puede mapear el mismo material si realmente aparece en más de una página.
-    # Siempre se muestra para revisión, nunca se omiten páginas duplicadas.
-    return candidates
+def suggest_matches(ocr_rows, catalog, aliases=None):
+    """Usa similitud tolerante al OCR sin modificar cantidades del remito."""
+    from fuzzy_match import suggest_matches as match
+    return match(ocr_rows,catalog,aliases)
 
 
 def reconcile(catalog, quantities, completed=False,include_hidden=True):

@@ -1,5 +1,26 @@
 # Control de POP liviano · Distribuidora del Valle (DDV)
 
+## Versión corregida: colores y reconocimiento flexible
+
+- **Tema claro real:** se eliminó la regla que ponía textos blancos en la barra lateral sobre controles blancos. La configuración `.streamlit/config.toml` fija `base = "light"`; los títulos, tablas, selectores y métricas utilizan letras oscuras y fondo claro.
+- **Comparación inteligente por descripción:** incorpora `fuzzy_match.py`, que compara nombres de la foto con los nombres, hojas, grupos, formatos y alias del Excel. Admite pequeñas diferencias en letras y números de las dimensiones (por ejemplo `AFÍCME`/`AFICHE` o `2OX3O`/`20X30`).
+- **Semáforos de revisión:** muestra el porcentaje de similitud textual, las dos alternativas más cercanas y alertas sobre material/campaña/medida diferente. Los nombres ambiguos no se enlazan automáticamente.
+- **Cantidades siempre exactas:** un remito de 358 contra Excel 350 da **sobrante de 8**, incluso si el texto matchea perfectamente. Si el OCR cree que `S20` representa `520`, lo propone para revisar pero NO lo carga en cantidad recibida.
+- Se mantienen los selectores separados de **carga** y **visualización** Q3/Q4, los resultados Q3 preexistentes, los respaldos JSON y la carga de nuevas fotos por trimestre.
+- Para aplicar esta versión subí también el **archivo nuevo `fuzzy_match.py`** y el `requirements.txt` actualizado (instala RapidFuzz).
+
+### Si el sitio sigue mostrando el tema anterior
+
+Después del *Commit changes*, esperá al nuevo deploy de Streamlit Community Cloud y **recargá la página con Ctrl+F5** en el navegador. En el panel de administración de Streamlit podés reiniciar la aplicación si el deploy no se ejecuta.
+
+### Revisión del OCR
+
+Después de pulsar «Leer remito», abrí «Lectura OCR» del mismo período y revisá las columnas **Cantidad**, **Material Excel**, **Similitud %**, **Excel sugerido**, **Diferencia tentativa**, **Alertas del match** y **Otras opciones**. Algunas filas quedan sin asignar si el texto está borroso o hay materiales muy parecidos. Es intencional: completar a ciegas crearía falsas coincidencias.
+
+Ejecutar pruebas: `python -m unittest discover -s tests -v` (24 pruebas).
+
+---
+
 Aplicación para **GitHub + Streamlit Community Cloud**, con **Q3 2026 precargado** y **Q4 2026** listo para cargar. Cada período tiene Excel, fotografías, lectura OCR, correcciones y resultados completamente separados.
 
 ## Funcionalidad principal
@@ -53,6 +74,7 @@ Requiere Python 3.11 o superior y Tesseract instalado con `spa` y `eng` para OCR
 
 | Archivo | Uso |
 | --- | --- |
+| `fuzzy_match.py` | Similitud de nombres de POP, errores OCR, formatos y prevención de falsos positivos |
 | `app.py` | Tablero multitrimestre con carga y visualización independientes |
 | `pop_core.py` | Extracción DDV de Excel, comparación por material y CSV |
 | `ocr_core.py` | OCR Tesseract para fotos/PDF |
