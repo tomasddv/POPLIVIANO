@@ -5,6 +5,8 @@ from copy import deepcopy
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+import math
+import hmac
 import json
 import re
 
@@ -16,6 +18,8 @@ from ocr_core import read_documents
 from pop_core import catalog_from_excel, integer_quantity, metrics, reconcile, suggest_matches, to_csv
 from period_store import (PERIOD_RE, archive_bytes, empty_period, merge_quantities,
                           new_source, restore_archive)
+from media_core import extract_pop_images, make_scan_previews, image_jpeg
+from persistence import make_store, read_zip_assets, write_zip_assets, StorageError
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown("""<style>
@@ -105,12 +109,56 @@ def confirm_ocr_rows(edited, catalog_ids):
     return dict(amounts),unknown,count
 
 
+def _seed_assets():
+    data_dir=Path(__file__).resolve().parent/'data'
+    q3=read_zip_assets((data_dir/'q3_gallery.zip').read_bytes())
+    mapping=json.loads((data_dir/'q3_pop_map.json').read_text(encoding='utf-8'))
+    return q3,mapping
+
+
 def initialize():
+    if 'pop_store' not in st.session_state:
+        try: secrets=dict(st.secrets)
+        except Exception: secrets={}
+        store,mode=make_store(secrets)
+        st.session_state.pop_store=store
+        st.session_state.storage_mode=mode
     if 'pop_periods' not in st.session_state:
         baseline=json.loads((Path(__file__).resolve().parent/'data'/'q3_2026_preliminar.json').read_text(encoding='utf-8'))
         q3=empty_period();q3.update(baseline)
-        st.session_state.pop_periods={'Q3 2026':q3,'Q4 2026':empty_period()}
-    # Cambios de selector deben aplicarse antes de crear los widgets de ese rerun.
+        q3_assets,pop_map=_seed_assets()
+        q3['pop_images']=pop_map
+        q3['remito_history']=[{
+            'id':'q3_base','fecha':'Q3 2026 (precargado)',
+            'accion':'Remito Q3 precargado','archivos':['Remito Q3 2026 (fotografía original)'],
+            'paginas':1,'filas_ocr':0,'filas_aplicadas':0,'sin_conciliar':0,
+            'estado':'Preliminar · requiere verificación',
+            'imagen_keys':['remitos/q3_base/pagina_01.jpg'],'firma':'q3_base'}]
+        q3['pending_remito_id']=None
+        periods={'Q3 2026':q3,'Q4 2026':empty_period()}
+        assets={'Q3 2026':q3_assets,'Q4 2026':{}}
+        st.session_state.load_error=''
+        try:
+            raw=st.session_state.pop_store.load()
+            if raw:
+                restored=restore_archive(raw)
+                periods.update(restored)
+                for label in restored:
+                    retrieved=st.session_state.pop_store.load_assets(label)
+                    if retrieved is not None:assets[label]=retrieved
+                # Compatibilidad con estados antiguos sin mapa de miniaturas.
+                if not periods['Q3 2026'].get('pop_images'):
+                    periods['Q3 2026']['pop_images']=pop_map
+                assets['Q3 2026']={**q3_assets,**assets.get('Q3 2026',{})}
+        except Exception as e:
+            st.session_state.load_error=str(e)
+        if not periods['Q3 2026'].get('pop_images') and periods['Q3 2026'].get('source_mode')=='Q3 2026 precargado':
+            periods['Q3 2026']['pop_images']=pop_map
+        if not periods['Q3 2026'].get('remito_history') and periods['Q3 2026'].get('source_mode')=='Q3 2026 precargado':
+            periods['Q3 2026']['remito_history']=q3['remito_history']
+        st.session_state.pop_periods=periods
+        st.session_state.pop_assets=assets
+        st.session_state.dirty_assets=set()
     if st.session_state.get('next_period_load') in st.session_state.pop_periods:
         st.session_state.period_load=st.session_state.pop('next_period_load')
     if st.session_state.get('next_period_view') in st.session_state.pop_periods:
@@ -121,6 +169,48 @@ def initialize():
         st.session_state.period_view='Q3 2026'
 
 
+def persist_changes(*,assets_changed=(),rerun=True):
+    st.session_state.dirty_assets.update(assets_changed)
+    try:
+        st.session_state.pop_store.save(st.session_state.pop_periods,
+            st.session_state.pop_assets,st.session_state.dirty_assets)
+    except Exception as e:
+        st.error(f'⚠️ No se pudo guardar el cambio: {e}. Sigue en la sesión. Reintentá con «Guardar cambios pendientes».')
+        return False
+    st.session_state.dirty_assets.clear()
+    st.session_state.last_saved=now_label()
+    if rerun:st.rerun()
+    return True
+
+
+def asset_key(cid):
+    return 'pop/'+sha256(cid.encode('utf-8')).hexdigest()[:20]+'.jpg'
+
+
+def register_remito(p, signature, names, files, photo_keys, rows_count):
+    identifier=sha256((signature+datetime.now().isoformat()).encode()).hexdigest()[:18]
+    p.setdefault('remito_history',[]).append({
+        'id':identifier,'fecha':now_label(),'accion':p['ocr_operation'],
+        'archivos':list(names),'paginas':len(photo_keys),'filas_ocr':rows_count,
+        'filas_aplicadas':0,'sin_conciliar':0,'estado':'OCR pendiente de revisión',
+        'imagen_keys':photo_keys,'firma':signature})
+    p['pending_remito_id']=identifier
+    return identifier
+
+
+try:
+    _gate=dict(st.secrets).get('APP_PASSWORD','')
+except Exception:_gate=''
+if _gate and not st.session_state.get('access_authorized',False):
+    st.title('🔒 Control POP liviano · DDV')
+    password_input=st.text_input('Contraseña de acceso al tablero',type='password')
+    if st.button('Ingresar'):
+        if hmac.compare_digest(str(password_input),str(_gate)):
+            st.session_state.access_authorized=True
+            st.rerun()
+        else:st.error('Contraseña incorrecta')
+    st.stop()
+
 initialize()
 periods=st.session_state.pop_periods
 st.title('📦 Control de POP liviano')
@@ -128,7 +218,17 @@ st.caption('Remitos vs. asignación de POP · Solo Distribuidora del Valle S.A. 
 
 with st.sidebar:
     st.markdown('### Control DDV')
-    st.caption('Cada período guarda su propio Excel, OCR y conciliación dentro de esta sesión.')
+    if st.session_state.storage_mode=='github':
+        if st.session_state.load_error:st.warning('GitHub configurado, pero la conexión falló. Corregí el token/repo antes de confiar en el guardado.')
+        else:st.success('☁️ Guardado permanente activo · GitHub privado')
+    elif st.session_state.storage_mode=='incompleto':
+        st.error('Guardado remoto sin configurar: faltan datos de GitHub.')
+    else:
+        st.warning('⚠️ Almacenamiento local: en Streamlit Cloud se pierde al reiniciar. Configurá GitHub privado para guardar permanentemente.')
+    if st.session_state.load_error:
+        st.error('No se pudo recuperar el historial remoto: '+st.session_state.load_error)
+    if st.button('💾 Guardar cambios pendientes',use_container_width=True):
+        if persist_changes(rerun=False):st.success('Estado guardado correctamente.')
     periods_ordered=sorted(periods,key=lambda s:(int(s.split()[1]),int(s[1])))
     load_period=st.selectbox('📥 Período de carga',periods_ordered,key='period_load')
     view_period=st.selectbox('📊 Período de visualización',periods_ordered,key='period_view')
@@ -141,7 +241,7 @@ with st.sidebar:
                 periods[label]=empty_period()
                 st.session_state.next_period_load=label
                 st.session_state.next_period_view=label
-                st.rerun()
+                persist_changes()
     st.divider()
     uploading=periods[load_period]
     st.markdown(f'**Carga de {load_period}**')
@@ -158,41 +258,64 @@ with st.sidebar:
             if uploading['source_digest']==digest:
                 st.info('Es el mismo Excel que ya está cargado; se conservaron las cantidades del remito.')
             else:
+                old_history=deepcopy(uploading.get('remito_history',[]))
                 periods[load_period]=new_source(uploading,binary,uploaded_excel.name,catalog_from_excel)
+                if old_history:
+                    for event in old_history:
+                        event['estado']=event.get('estado','')+' · Excel reemplazado'
+                    periods[load_period]['remito_history']=old_history
                 st.session_state.next_period_view=load_period
-                st.success('Excel actualizado. Se reiniciaron SOLO las lecturas de este trimestre.')
-                st.rerun()
+                pictures=extract_pop_images(binary,periods[load_period]['catalog'])
+                assets_for_period=st.session_state.pop_assets.setdefault(load_period,{})
+                img_map={}
+                for material_id,picture in pictures.items():
+                    key=asset_key(material_id)
+                    assets_for_period[key]=picture
+                    img_map[material_id]=key
+                periods[load_period]['pop_images']=img_map
+                st.success(f'Excel actualizado · {len(pictures)} imágenes POP vinculadas.')
+                persist_changes(assets_changed=[load_period])
         except Exception as ex:st.error(f'No se pudo aplicar el archivo Excel: {ex}')
     remito=st.file_uploader('2. Fotos del remito o PDF (hasta 3 páginas)',type=['png','jpg','jpeg','webp','pdf'],
                             accept_multiple_files=True,key=f'remito_{period_key(load_period)}')
     treatment=st.radio('Qué hacer con la nueva lectura',
-        ['Reemplazar cantidades anteriores','Agregar páginas al remito actual'],
+        ['Reemplazar cantidades anteriores','Agregar páginas al remito actual','Agregar un remito nuevo al período'],
         key=f'operation_{period_key(load_period)}',
-        help='Reemplazar: el nuevo remito sustituye las cantidades anteriores cuando confirmes el OCR. Agregar: suma cantidades, solo si son páginas diferentes del MISMO remito.')
+        help='Reemplazar: reinicia los totales de recepción. Agregar páginas: suma páginas no incluidas. Agregar un remito nuevo: suma un documento adicional del trimestre.')
     two_columns=st.checkbox('El remito tiene dos columnas',value=True,key=f'columns_{period_key(load_period)}')
     split=st.slider('Separación de columnas (%)',42,58,50,disabled=not two_columns,key=f'split_{period_key(load_period)}')/100
-    if treatment=='Agregar páginas al remito actual':
-        st.warning('No vuelvas a subir páginas ya contabilizadas: se sumarían dos veces.')
+    if treatment.startswith('Agregar'):
+        st.warning('Solo subí documentos o páginas nuevos. Los totales se sumarán a lo ya registrado.')
     run_ocr=st.button('🔎 Leer remito para este período',type='primary',use_container_width=True,
                       disabled=not remito or not uploading['catalog'])
     if run_ocr:
         try:
             files=[(x.name,x.getvalue()) for x in remito]
             signature=sha256(b'|'.join(x.encode()+b':'+sha256(data).hexdigest().encode() for x,data in files)).hexdigest()
-            if treatment=='Agregar páginas al remito actual' and signature in uploading['processed_signatures']:
+            if treatment.startswith('Agregar') and signature in uploading['processed_signatures']:
                 st.error('Estas páginas ya fueron procesadas para este período. No se permite sumarlas dos veces.')
             else:
                 with st.spinner(f'Leyendo páginas de {load_period}…'):
                     result=read_documents(files,two_columns=two_columns,split=split,max_pages=3)
                     suggestions=suggest_matches(result.rows,uploading['catalog'],uploading['aliases'])
+                imgs=make_scan_previews(files,max_pages=3)
+                upload_id=sha256((signature+datetime.now().isoformat()).encode()).hexdigest()[:18]
+                imgs_keys=[f'remitos/{upload_id}/pagina_{i+1:02d}.jpg' for i in range(len(imgs))]
+                assets_for_period=st.session_state.pop_assets.setdefault(load_period,{})
+                assets_for_period.update(zip(imgs_keys,imgs))
                 uploading.update(ocr_rows=suggestions,ocr_raw=result.raw_text,ocr_warnings=result.warnings,
                     ocr_previews=result.images,ocr_edited_rows=None,ocr_edit_ver=0,
                     ocr_version=uploading['ocr_version']+1,ocr_signature=signature,
                     ocr_operation=treatment,ocr_base_entries=deepcopy(uploading['remito_entries']),
                     remito_files=[name for name,_ in files])
                 st.session_state.next_period_view=load_period
-                st.success(f'{len(suggestions)} renglones reconocidos. Revisalos en la pestaña OCR antes de aplicarlos.')
-                st.rerun()
+                for event in uploading.get('remito_history',[]):
+                    if event.get('id')==uploading.get('pending_remito_id') and 'pendiente' in event.get('estado','').lower():
+                        event['estado']='Sustituido sin aplicar'
+                register_remito(uploading,signature,[n for n,_ in files],files,imgs_keys,len(suggestions))
+                uploading['last_updated']=now_label()
+                st.success(f'{len(suggestions)} renglones reconocidos. El remito quedó registrado; confirmá las cantidades en Lectura OCR.')
+                persist_changes(assets_changed=[load_period])
         except Exception as ex:st.error(f'Error en el OCR: {ex}')
     st.divider()
     st.markdown('**Historial de períodos**')
@@ -214,12 +337,25 @@ with st.sidebar:
             if not restored:raise ValueError('El archivo no contiene períodos.')
             # Los períodos faltantes en el respaldo se conservan; los presentes se reemplazan.
             periods.update(restored)
+            if 'Q3 2026' in restored and not periods['Q3 2026'].get('pop_images') and periods['Q3 2026'].get('source_mode')=='Q3 2026 precargado':
+                _,seed_mapping=_seed_assets()
+                periods['Q3 2026']['pop_images']=seed_mapping
             if st.session_state.period_load not in periods:st.session_state.period_load=next(iter(periods))
             if st.session_state.period_view not in periods:st.session_state.period_view=next(iter(periods))
             st.success('Historial recuperado correctamente.')
-            st.rerun()
+            persist_changes()
         except Exception as ex:st.error(f'No se pudo restaurar el historial: {ex}')
-    st.caption('En Streamlit Cloud el historial no persiste automáticamente tras cerrar o reiniciar la app. Guardá el JSON y restauralo al volver.')
+    with st.expander('Restaurar imágenes guardadas (ZIP)'):
+        pictures_zip=st.file_uploader('Archivo ZIP de imágenes exportado',type=['zip'],key=f'restore_photos_{period_key(load_period)}')
+        if st.button('Restaurar imágenes de este período',disabled=pictures_zip is None):
+            try:
+                restored_assets=read_zip_assets(pictures_zip.getvalue())
+                st.session_state.pop_assets.setdefault(load_period,{}).update(restored_assets)
+                if not periods[load_period].get('pop_images'):
+                    st.warning('Para recuperar las asociaciones de las imágenes POP también hay que restaurar su historial JSON.')
+                persist_changes(assets_changed=[load_period])
+            except Exception as ex:st.error(f'No se pudo restaurar el ZIP: {ex}')
+    st.caption('Los controles y las imágenes se guardan al realizar cambios. Para persistencia real en Streamlit Cloud: repositorio de datos privado configurado en Secrets.')
 
 st.markdown(f'### Resultados · {view_period}')
 if load_period!=view_period:
@@ -258,8 +394,9 @@ names=labels_for(catalog,p['aliases'])
 valid_ids=set(names)
 options=['(sin asignar)']+list(names.values())
 
-page_summary,page_ocr,page_items,page_labels,page_export=st.tabs([
-    '📊 Resumen','📷 Lectura OCR','🧾 Control por material','🏷️ Nombres de materiales','📥 Exportar / auditar'])
+page_summary,page_ocr,page_items,page_gallery,page_history,page_labels,page_export=st.tabs([
+    '📊 Resumen','📷 Lectura OCR','🧾 Control por material',
+    '🖼️ Galería de POP','📑 Remitos registrados','🏷️ Nombres de materiales','📥 Exportar / auditar'])
 
 with page_summary:
     st.subheader(f'Conciliación por hoja · {view_period}')
@@ -360,8 +497,12 @@ with page_ocr:
             if p['ocr_signature'] not in p['processed_signatures']:
                 p['processed_signatures'].append(p['ocr_signature'])
             p['last_updated']=now_label()
+            for event in reversed(p.get('remito_history',[])):
+                if event['id']==p.get('pending_remito_id'):
+                    event.update(estado='OCR aplicado · revisión pendiente',filas_aplicadas=count,sin_conciliar=len(unknown))
+                    break
             st.toast(f'{count} líneas aplicadas a {view_period}. Pendientes: {len(unknown)}.')
-            st.rerun()
+            persist_changes()
         if p['unmatched']:
             st.markdown('**Renglones sin conciliar**')
             st.dataframe(pd.DataFrame(p['unmatched']),hide_index=True,use_container_width=True)
@@ -406,21 +547,95 @@ with page_items:
                 else:update[obj['ID']]=amount
             p['remito_entries']=update;p['edit_version']+=1
             p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label()
-            st.rerun()
+            persist_changes()
     st.divider()
     blocked=bool(p['unmatched']) or not p['remito_entries']
     if not p['is_complete']:
         st.caption('Para cerrar el remito debe haber cantidades registradas, no quedar renglones OCR sin resolver y haberse revisado físicamente TODAS sus páginas.')
         if st.button('✅ Marcar remito completamente revisado',disabled=blocked,key=f'finish_{period_key(view_period)}'):
-            p['is_complete']=True;p['preliminary']=False;p['last_updated']=now_label();st.rerun()
+            p['is_complete']=True;p['preliminary']=False;p['last_updated']=now_label()
+            for event in reversed(p.get('remito_history',[])):
+                if event.get('id')==p.get('pending_remito_id'):event['estado']='Remito revisado y cerrado';break
+            persist_changes()
     else:
         if st.button('Reabrir revisión del remito',key=f'reopen_{period_key(view_period)}'):
-            p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label();st.rerun()
+            p['is_complete']=False;p['preliminary']=True;p['last_updated']=now_label();persist_changes()
     with st.expander('Reiniciar cantidades de este trimestre'):
         st.warning('Esta acción borra solo las cantidades de remito de este período. No modifica los otros trimestres ni las asignaciones del Excel.')
         if st.button(f'Borrar cantidades de {view_period}',key=f'clear_{period_key(view_period)}'):
             p['remito_entries']={};p['unmatched']=[];p['is_complete']=False;p['preliminary']=False
-            p['edit_version']+=1;p['last_updated']=now_label();st.rerun()
+            p['edit_version']+=1;p['last_updated']=now_label();persist_changes()
+
+with page_gallery:
+    st.subheader(f'Galería de POP · {view_period}')
+    st.caption('Imágenes reales incrustadas en el Excel de asignación. Cantidades: fila DDV de cada hoja vs. remitos registrados del período.')
+    gallery_assets=st.session_state.pop_assets.get(view_period,{})
+    image_map=p.get('pop_images',{})
+    c1,c2,c3=st.columns([2,2,1])
+    gallery_search=c1.text_input('Buscar material',key=f'gallery_search_{period_key(view_period)}',placeholder='Marca, tamaño, campaña…')
+    gallery_sheet=c2.selectbox('Familia / hoja',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'gallery_sheet_{period_key(view_period)}')
+    gallery_status=c3.selectbox('Estado',['Todos','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'gallery_status_{period_key(view_period)}')
+    q=gallery_search.strip().casefold()
+    gallery_rows=[r for r in rows if (r['cantidad_excel']>0 or r['verificado'])
+                  and (gallery_sheet=='Todas' or r['hoja']==gallery_sheet)
+                  and (gallery_status=='Todos' or r['estado']==gallery_status)
+                  and (not q or q in (str(p['aliases'].get(r['id']) or '')+' '+r['material']+' '+r['hoja']).casefold())]
+    with st.expander('Asignar o reemplazar la imagen de un POP',expanded=False):
+        material_options={f"{r['hoja']} · {r['formato']} · {r['id']}":r['id'] for r in rows}
+        selected=st.selectbox('Material',list(material_options),key=f'gallery_edit_{period_key(view_period)}')
+        uploaded_photo=st.file_uploader('Foto del POP (JPG, PNG, WEBP)',type=['jpg','jpeg','png','webp'],key=f'gallery_photo_{period_key(view_period)}')
+        if st.button('Guardar imagen de este POP',disabled=uploaded_photo is None):
+            try:
+                cid=material_options[selected];key=asset_key(cid)
+                st.session_state.pop_assets.setdefault(view_period,{})[key]=image_jpeg(uploaded_photo.getvalue())
+                p.setdefault('pop_images',{})[cid]=key
+                p['last_updated']=now_label()
+                persist_changes(assets_changed=[view_period])
+            except Exception as exc:st.error(f'Imagen inválida: {exc}')
+    gallery_total=len(gallery_rows)
+    pages=max(1,math.ceil(gallery_total/12))
+    page_number=st.number_input('Página de la galería',min_value=1,max_value=pages,value=1,step=1,
+                                 key=f'gallery_page_{period_key(view_period)}')
+    st.caption(f'{gallery_total} materiales · Página {page_number} de {pages} · {sum(r["id"] in image_map and image_map[r["id"]] in gallery_assets for r in gallery_rows)} con imagen')
+    part=gallery_rows[(int(page_number)-1)*12:int(page_number)*12]
+    for start in range(0,len(part),3):
+        columns=st.columns(3)
+        for box,r in zip(columns,part[start:start+3]):
+            with box:
+                with st.container(border=True):
+                    pic=gallery_assets.get(image_map.get(r['id'],''))
+                    if pic:st.image(pic,use_container_width=True)
+                    else:st.info('Sin imagen vinculada · cargala arriba')
+                    st.markdown(f"**{p['aliases'].get(r['id']) or r['formato']}**")
+                    st.caption(f"{r['hoja']} · {r['celda']} · {r['estado']}")
+                    a,b=st.columns(2)
+                    a.metric('Asignado',pretty(r['cantidad_excel']))
+                    b.metric('Remito','—' if r['cantidad_remito'] is None else pretty(r['cantidad_remito']))
+                    if r['diferencia'] is None:st.caption('Diferencia pendiente de comprobar')
+                    elif r['diferencia']==0:st.success('Coincide · diferencia 0')
+                    elif r['diferencia']<0:st.error(f"Faltan {pretty(abs(r['diferencia']))} unidades")
+                    else:st.warning(f"Sobran {pretty(r['diferencia'])} unidades")
+    if not part:st.info('No hay materiales para estos filtros.')
+
+with page_history:
+    st.subheader(f'Remitos registrados · {view_period}')
+    events=p.get('remito_history',[])
+    st.caption('Cada incorporación de un remito queda registrada con fecha, archivos, operación y estado de revisión. Las imágenes se conservan en el almacenamiento configurado.')
+    if events:
+        st.dataframe(pd.DataFrame([{
+            'Fecha':e.get('fecha',''), 'Operación':e.get('accion',''),
+            'Archivos':', '.join(e.get('archivos',[])),
+            'Páginas':e.get('paginas',0),'Renglones OCR':e.get('filas_ocr',0),
+            'Aplicados':e.get('filas_aplicadas',0),'Estado':e.get('estado','')}
+            for e in reversed(events)]),use_container_width=True,hide_index=True)
+        scans=st.session_state.pop_assets.get(view_period,{})
+        for e in reversed(events):
+            with st.expander(f"{e.get('fecha','')} · {', '.join(e.get('archivos',[]))} · {e.get('estado','')}"):
+                st.write(f"Operación: **{e.get('accion','')}** · Páginas conservadas: {len(e.get('imagen_keys',[]))}")
+                for key in e.get('imagen_keys',[]):
+                    if key in scans:st.image(scans[key],use_container_width=True)
+                    else:st.warning('Imagen original no disponible en el registro; permanece el nombre de archivo.')
+    else:st.info('Todavía no se agregaron remitos para este período.')
 
 with page_labels:
     st.subheader(f'Identificación de materiales · {view_period}')
@@ -439,7 +654,7 @@ with page_labels:
         p['aliases']={r['ID']:str(r['Descripción personalizada']).strip()
                       for r in aliases_data.to_dict('records')
                       if str(r['Descripción personalizada']).strip() not in ('','nan','None')}
-        p['last_updated']=now_label();p['edit_version']+=1;st.rerun()
+        p['last_updated']=now_label();p['edit_version']+=1;persist_changes()
 
 with page_export:
     st.subheader(f'Descargas y auditoría · {view_period}')
@@ -457,7 +672,10 @@ with page_export:
     if p['issues']:
         st.markdown('**Alertas de lectura Excel**')
         for issue in p['issues']:st.caption('• '+str(issue))
-    st.info('Los datos del remito se procesan en el servidor. Los respaldos JSON conservan resultados y correcciones, pero NO contienen las fotografías ni los Excel completos. Si el hosting reinicia, restaurá el JSON.')
+    st.info('Con GitHub privado configurado, el registro y las fotografías se guardan de forma permanente. El historial JSON es un respaldo adicional, sin imágenes.')
+    st.download_button('⬇️ Descargar imágenes de POP y remitos (ZIP)',
+        write_zip_assets(st.session_state.pop_assets.get(view_period,{})),
+        file_name=f'POP_DDV_{period_key(view_period)}_imagenes.zip',mime='application/zip')
 
 st.divider()
 st.caption('POP liviano · DDV · Cada trimestre es independiente. Nunca se considera una cifra OCR como recepción física certificada sin revisión.')

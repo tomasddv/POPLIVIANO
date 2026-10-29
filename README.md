@@ -1,65 +1,84 @@
-# Control de POP liviano · Distribuidora del Valle (DDV)
+# Control de POP liviano · DDV · Q3 / Q4
 
-## Versión corregida: colores y reconocimiento flexible
+Tablero en **Streamlit** para el control trimestral del POP liviano de **Distribuidora del Valle S.A.**. Listo para subir a GitHub y desplegar en Streamlit Community Cloud.
 
-- **Tema claro real:** se eliminó la regla que ponía textos blancos en la barra lateral sobre controles blancos. La configuración `.streamlit/config.toml` fija `base = "light"`; los títulos, tablas, selectores y métricas utilizan letras oscuras y fondo claro.
-- **Comparación inteligente por descripción:** incorpora `fuzzy_match.py`, que compara nombres de la foto con los nombres, hojas, grupos, formatos y alias del Excel. Admite pequeñas diferencias en letras y números de las dimensiones (por ejemplo `AFÍCME`/`AFICHE` o `2OX3O`/`20X30`).
-- **Semáforos de revisión:** muestra el porcentaje de similitud textual, las dos alternativas más cercanas y alertas sobre material/campaña/medida diferente. Los nombres ambiguos no se enlazan automáticamente.
-- **Cantidades siempre exactas:** un remito de 358 contra Excel 350 da **sobrante de 8**, incluso si el texto matchea perfectamente. Si el OCR cree que `S20` representa `520`, lo propone para revisar pero NO lo carga en cantidad recibida.
-- Se mantienen los selectores separados de **carga** y **visualización** Q3/Q4, los resultados Q3 preexistentes, los respaldos JSON y la carga de nuevas fotos por trimestre.
-- Para aplicar esta versión subí también el **archivo nuevo `fuzzy_match.py`** y el `requirements.txt` actualizado (instala RapidFuzz).
+## Novedades de esta entrega
 
-### Si el sitio sigue mostrando el tema anterior
+1. **Galería fotográfica de POP**: se procesaron las imágenes realmente incrustadas en el Excel Q3 original. Hay **98 imágenes vinculadas a los 100 materiales DDV**. El ZIP incluye miniaturas y asignaciones, sin necesidad de volver a cargar el Excel Q3. En Q4 la app intentará obtener automáticamente las imágenes incrustadas de su Excel. Si faltan, se pueden subir manualmente desde la pestaña **🖼️ Galería de POP**.
+2. **Cada ficha** presenta fotografía, nombre de material, hoja del Excel, cantidad asignada DDV, cantidad del remito, estado y diferencia. Permite filtros por marca/hoja, estado, búsqueda de texto y páginas de 12 fichas para una carga ágil.
+3. **📑 Remitos registrados**: historial de cada remito o grupo de páginas subido, fecha, nombres de los archivos, modo de carga (reemplazo, páginas adicionales o **nuevo remito**), páginas, renglones reconocidos, renglones confirmados y su estado. Conserva una copia comprimida de las fotos/PDF rasterizado de cada remito.
+4. **Guardado automático al realizar una operación**: al cargar Excel, subir remitos, aplicar revisión OCR, hacer correcciones, marcar el remito como completo, editar nombres, añadir un período o añadir fotos de POP. **La permanencia en Streamlit Cloud requiere configurar un repositorio de datos GitHub privado, como se describe abajo.**
+5. Siguen funcionando Q3 precargado, Q4 por cargar, el OCR tolerante a pequeños errores de texto, los controles exactos de cantidades, los selectores separados para carga y visualización y la exportación CSV/JSON.
 
-Después del *Commit changes*, esperá al nuevo deploy de Streamlit Community Cloud y **recargá la página con Ctrl+F5** en el navegador. En el panel de administración de Streamlit podés reiniciar la aplicación si el deploy no se ejecuta.
+## IMPORTANTE: configurar guardado duradero en la nube
 
-### Revisión del OCR
+El disco de **Streamlit Community Cloud NO es permanente**. Guardar en archivos locales o `st.session_state` no basta. Para que al cerrar y volver a abrir la web se recupere todo, esta versión guarda el historial y las fotos en **un segundo repositorio privado de GitHub**, distinto del repositorio que ejecuta la aplicación. Es necesario configurar la conexión **una sola vez**.
 
-Después de pulsar «Leer remito», abrí «Lectura OCR» del mismo período y revisá las columnas **Cantidad**, **Material Excel**, **Similitud %**, **Excel sugerido**, **Diferencia tentativa**, **Alertas del match** y **Otras opciones**. Algunas filas quedan sin asignar si el texto está borroso o hay materiales muy parecidos. Es intencional: completar a ciegas crearía falsas coincidencias.
+### Paso 1 — Repositorio privado exclusivo para datos
 
-Ejecutar pruebas: `python -m unittest discover -s tests -v` (24 pruebas).
+1. En GitHub, elegí **New repository**.
+2. Nombre sugerido: `registro-pop-liviano-ddv`.
+3. Marcá **Private**. Creá el repositorio con `README.md` inicial (para que exista la rama `main`).
+4. Este repositorio debe ser **distinto** del repositorio de la app, para evitar un *redeploy* de Streamlit en cada guardado.
 
----
+### Paso 2 — Crear credencial (token)
 
-Aplicación para **GitHub + Streamlit Community Cloud**, con **Q3 2026 precargado** y **Q4 2026** listo para cargar. Cada período tiene Excel, fotografías, lectura OCR, correcciones y resultados completamente separados.
+1. En GitHub, abrí **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+2. Seleccioná **Only select repositories** y elegí **solo** el repositorio privado de datos.
+3. En **Repository permissions**, otorgá a **Contents: Read and write** (los permisos necesarios de Metadata se otorgan automáticamente).
+4. Copiá el token y tratálo como una contraseña. No lo subas a GitHub ni lo pegues en `app.py`.
 
-## Funcionalidad principal
+### Paso 3 — Secrets de Streamlit Cloud
 
-- Dos selectores independientes: **Período de carga** y **Período de visualización**. Elegir Q3 para cargar fotos no borra ni altera Q4.
-- **Q3 2026 listo al abrir:** catálogo real de 100 columnas DDV, 95.590 unidades asignadas y 93.750 unidades transcriptas provisoriamente del remito anterior (70 coincidencias, 1 diferencia, 3 pendientes). **No están certificadas**: la foto era de lectura difícil.
-- En Q3, podés **subir una imagen nueva** del remito y elegir **Reemplazar cantidades anteriores**. Después se revisa la tabla OCR y se aplica a Q3.
-- Si el documento viene en páginas distintas, podés **Agregar páginas al remito actual**. Solo debe usarse para páginas no contabilizadas. La misma carga no se suma dos veces por accidente.
-- **Q4 2026:** elegí Q4 en «Período de carga», aplicá el Excel nuevo y luego el remito Q4 (foto o PDF, hasta 3 páginas por lectura).
-- Comparación de cada material con la fila **Distribuidora del Valle S.A.**, en **todas las hojas, incluidas ocultas**, sin mezclar los totales de las demás distribuidoras.
-- Tabla de materiales por pestaña y estado (Coincide, Faltante, Sobrante, Pendiente), gráficos, cambios manuales, nombres personalizados, exportación CSV.
-- Podés agregar nuevos trimestres, por ejemplo Q1 2027, desde el lateral.
-- **Historial JSON global:** descarga todas las asignaciones extraídas, cantidades OCR aplicadas, nombres y estados de Q3 y Q4; permite restaurarlos en sesiones futuras, incluso sin volver a subir los Excel. No contiene las fotos ni los Excel originales.
+Abrí la aplicación desplegada en Streamlit Community Cloud y entrá en **App settings / Settings → Secrets**. Pegá lo siguiente con **tus valores**:
 
-## Publicar o actualizar en GitHub
+```toml
+DATA_GITHUB_REPO = "TU_USUARIO/registro-pop-liviano-ddv"
+DATA_GITHUB_TOKEN = "TU_TOKEN_GITHUB"
+DATA_GITHUB_BRANCH = "main"
+APP_PASSWORD = "TU_CONTRASENA_DE_ACCESO"
+```
 
-1. Abrí tu repositorio de GitHub que contiene la versión anterior del tablero POP. Si todavía no existe, creá uno **privado**.
-2. **Reemplazá o subí los archivos de este ZIP**, respetando subcarpetas: `app.py`, `pop_core.py`, `ocr_core.py`, `period_store.py`, `requirements.txt`, `packages.txt`, `.streamlit/config.toml` y `data/q3_2026_preliminar.json`.
-3. Hacé *Commit changes* en la rama que usás para publicar, generalmente `main`.
-4. Si ya tenías la app creada en <https://share.streamlit.io/>, se redepliega con el cambio. Si no, creá una app con **`app.py`** como archivo de inicio.
-5. Streamlit Cloud instala automáticamente Tesseract por `packages.txt` para leer las imágenes. No necesitás contratar API de visión.
+`APP_PASSWORD` es opcional técnicamente pero **muy recomendable**: sin contraseña, cualquiera que acceda a la URL pública de Streamlit podría ver o cambiar información del tablero. No compartas esa contraseña ni el token en el repositorio.
 
-**No subir el Excel original ni las fotos al repositorio.** El proyecto **sí incluye una extracción de DDV de Q3** como `data/q3_2026_preliminar.json`, porque pediste ver Q3 de entrada. Esta extracción contiene cantidades y descripciones comerciales internas: por eso, **mantener el repositorio privado** y verificar quién puede acceder a la aplicación.
+En la barra lateral debe aparecer **«☁️ Guardado permanente activo · GitHub privado»**. Si aparece un error de GitHub, no des por guardados los cambios hasta corregirlo. El repositorio de datos contendrá:
 
-## Uso diario
+- `pop_ddv/registro.json`: asignaciones extraídas, cantidades registradas, correcciones, historial y estado por trimestre.
+- `pop_ddv/assets/Q3_2026.zip`, `Q4_2026.zip`, etc.: fotos de POP y páginas de remitos ya comprimidas.
 
-1. Seleccioná **Q3 2026** o **Q4 2026** en «Período de carga».
-2. Subí el Excel, si ese período todavía no tiene uno. En Q3 ya hay catálogo precargado, por lo que podés omitirlo.
-3. Subí las fotos o PDF del remito. Elegí **Reemplazar** o **Agregar páginas**, según corresponda.
-4. Presioná **Leer remito para este período**.
-5. En la pestaña **Lectura OCR**, corregí cualquier cifra errónea y asigná cada material. Luego presioná **Aplicar revisión a este período**.
-6. Elegí el período que te interese en «Período de visualización». Revisá el resumen y las diferencias por material/hoja.
-7. Confirmá el remito completo solo cuando hayas verificado todas sus páginas. Descargá el CSV y el **historial JSON**.
+### Si todavía no configuraste el repositorio de datos
 
-## Persistencia y límites
+El programa funciona en una computadora con almacenamiento local `.local_store`, pero **en Streamlit Cloud estos archivos se pueden perder después de un reinicio, redeploy o hibernación**. Aparecerá una advertencia; para la persistencia solicitada se debe activar GitHub. También podés descargar respaldos JSON y ZIP de imágenes por período.
 
-Streamlit Community Cloud **no es almacenamiento permanente**. Los cambios viven en la sesión: al cerrar, cambiar de navegador o reiniciar el servidor puede perderse el avance. Al terminar cada sesión, usá **Descargar historial Q3 / Q4 (JSON)** y la próxima vez **Restaurar historial guardado**. El catálogo inicial Q3 siempre aparece precargado incluso sin restaurar, pero tus cambios posteriores a Q3 deben restaurarse desde JSON.
+## Cómo usar el tablero
 
-El OCR de fotos borrosas puede confundir cantidades. Ni un match sugerido ni una cifra OCR constituyen un control de recepción validado. Un material sin lectura permanece como **pendiente**, no se marca cero automáticamente. Si cerrás el remito completo, los materiales no registrados se consideran faltantes.
+1. Seleccioná **Período de carga**: Q3 2026, Q4 2026 u otro trimestre.
+2. Q3 ya tiene el Excel, catálogo, imágenes y lectura provisional. En Q4 subí el Excel correspondiente; el sistema lee solamente filas DDV (incluidas hojas ocultas) y extrae las imágenes si están incrustadas.
+3. Elegí una de las operaciones: **Reemplazar cantidades anteriores**, **Agregar páginas al remito actual**, o **Agregar un remito nuevo al período**. Agregar suma cantidades; reemplazar las sustituye al confirmar.
+4. Subí fotos o un PDF de hasta tres páginas, pulsá **Leer remito**. La nueva carga se registra en el historial como *OCR pendiente* y las fotos quedan guardadas. No vuelvas a cargar el mismo remito en modo «Agregar».
+5. En **📷 Lectura OCR**, revisá cantidades dudosas y seleccioná los materiales adecuados. Pulsá **Aplicar revisión**. Las cantidades se cotejan **exactamente**; la tolerancia de letras y números mal reconocidos se aplica **al nombre del material**, no al conteo de unidades.
+6. En **🖼️ Galería de POP**, compará la imagen, la asignación y la cantidad del remito. Si falta una imagen, asignala desde la galería.
+7. En **📑 Remitos registrados**, verificá si se cargó un nuevo remito y revisá sus fotos.
+8. Los cambios se guardan automáticamente cuando se confirman, si GitHub está configurado. Opcionalmente usá **Guardar cambios pendientes**.
+
+## Actualizar código en tu repositorio GitHub
+
+Subí el contenido descomprimido de este ZIP al repositorio **de la aplicación** y elegí Commit Changes. Conservá la estructura y agregá todos los nuevos archivos:
+
+- `app.py`, `period_store.py`, `media_core.py`, `persistence.py` y módulos existentes de OCR/conciliación.
+- `data/q3_2026_preliminar.json`, `data/q3_gallery.zip`, `data/q3_pop_map.json` (imágenes Q3 precargadas).
+- `.streamlit/config.toml`, `requirements.txt`, `packages.txt`, `tests/`.
+
+**Nunca subas `.streamlit/secrets.toml` real ni el contenido de `.local_store`.** El ejemplo `.streamlit/secrets.toml.example` contiene solo marcadores; sirve para copiar la estructura de Secrets. Para información comercial sensible, mantené los repositorios privados y restringí el acceso al tablero.
+
+## Seguridad, límites y verificación
+
+- El OCR en fotografías borrosas puede confundir cifras o campañas. Cada resultado se revisa manualmente antes de validar una recepción. Los nombres aproximados no autorizan a igualar cantidades.
+- Las 98 imágenes Q3 se asociaron a la columna de Excel de cada material a partir de sus anclajes internos. Las dos fichas sin imagen permiten carga manual. Confirmá visualmente las campañas si las plantillas Q4 son distintas.
+- Los registros históricos originales del remito Q3 contienen una lectura **provisional**, no una recepción certificada.
+- Los respaldos JSON conservan valores e historial, pero las imágenes se respaldan por separado en ZIP. La configuración remota guarda ambos.
+- El servidor de GitHub debe aceptar los cambios (si aparece una alerta de error no se marca el guardado como exitoso). Los repositorios de datos separados evitan que cada registro active un redespliegue de la aplicación.
+- Pruebas de lógica: `python -m unittest discover -s tests -v`. No se realizó un despliegue real en tu cuenta de Streamlit Cloud durante esta entrega.
 
 ## Ejecutar localmente
 
@@ -68,17 +87,4 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Requiere Python 3.11 o superior y Tesseract instalado con `spa` y `eng` para OCR local. `packages.txt` se encarga de esto al publicar en Streamlit Cloud.
-
-## Estructura del proyecto
-
-| Archivo | Uso |
-| --- | --- |
-| `fuzzy_match.py` | Similitud de nombres de POP, errores OCR, formatos y prevención de falsos positivos |
-| `app.py` | Tablero multitrimestre con carga y visualización independientes |
-| `pop_core.py` | Extracción DDV de Excel, comparación por material y CSV |
-| `ocr_core.py` | OCR Tesseract para fotos/PDF |
-| `period_store.py` | Estado por período, consolidación y backup/restore JSON |
-| `data/q3_2026_preliminar.json` | Catálogo DDV real y remito preliminar Q3; sin fotos |
-| `requirements.txt`, `packages.txt` | Dependencias para Streamlit Community Cloud |
-| `tests/` | Pruebas de conciliación, integridad del Q3 y aislamiento Q3/Q4 |
+Para leer fotos en local, instalá Tesseract OCR con idiomas `spa` y `eng`. En Streamlit Cloud lo solicita `packages.txt`.

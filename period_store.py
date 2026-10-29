@@ -13,6 +13,7 @@ FIELDS = (
     'remito_entries','aliases','unmatched','is_complete','ocr_rows',
     'ocr_raw','ocr_warnings','ocr_edited_rows','ocr_version','ocr_edit_ver',
     'edit_version','remito_files','processed_signatures','ocr_signature',
+    'remito_history','pending_remito_id','pop_images',
     'ocr_operation','ocr_base_entries','notes','last_updated','preliminary',
 )
 
@@ -27,7 +28,7 @@ def empty_period():
         'edit_version':0,'remito_files':[],'processed_signatures':[],
         'ocr_signature':None,'ocr_operation':'Reemplazar cantidades anteriores',
         'ocr_base_entries':{},'notes':'','last_updated':'','preliminary':False,
-        'ocr_previews':[],
+        'ocr_previews':[],'remito_history':[], 'pending_remito_id':None, 'pop_images':{},
     }
 
 
@@ -44,7 +45,7 @@ def new_source(state, content: bytes, name: str, parser):
 
 def merge_quantities(base, new, operation):
     """Agregar acumula sobre el estado previo al OCR, no sobre aplicaciones anteriores."""
-    if operation == 'Agregar páginas al remito actual':
+    if operation in ('Agregar páginas al remito actual','Agregar un remito nuevo al período'):
         result=deepcopy(base)
         for key,value in new.items():result[key]=result.get(key,0)+value
         return result
