@@ -1,3 +1,25 @@
+# NUEVO — Consolidación mensual de múltiples Excel y remitos
+
+Este proyecto permite crear y seleccionar meses (`2026-10`, `2026-11`, etc.),
+subir **hasta 15 Excel por lote** y **hasta 20 páginas de remitos o fotografías
+por lote**. Podés realizar múltiples cargas durante el mes y consultar
+las sumas en la planilla visual de Resumen. Las asignaciones Excel se agregan
+solo para lotes nuevos, y los remitos se agregan después de revisar el OCR.
+
+- Los Excel se consolidan **exclusivamente para Distribuidora del Valle S.A.**;
+  otros distribuidores y POP con asignación DDV cero no se contabilizan.
+- Un archivo idéntico se bloquea por huella digital (SHA-256) para evitar
+  duplicados, aun si cambia el nombre. Se conservan los registros por archivo.
+- Q3/Q4 históricos siguen disponibles, sin mezclar sus cifras con un mes nuevo.
+- La vista Resumen mantiene las fotografías reales de los POP, las cantidades,
+  la diferencia y la verificación física en verde.
+- Para mantener los datos tras cerrar Streamlit Cloud sigue siendo obligatorio
+  el repositorio privado de datos configurado en Secrets.
+
+**Uso detallado y precauciones:** leer `GUIA_CARGA_MENSUAL.md`.
+
+---
+
 # Actualización de OCR: lectura por posición (29/10/2026)
 
 Esta versión corrige el reconocimiento de los remitos fotografiados sin exigir fotos nuevas.

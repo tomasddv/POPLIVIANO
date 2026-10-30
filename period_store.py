@@ -7,7 +7,7 @@ import json
 import re
 import math
 
-PERIOD_RE = re.compile(r"^Q[1-4] 20\d{2}$")
+PERIOD_RE = re.compile(r"(?:^Q[1-4] 20\d{2}$)|(?:^20\d{2}-(?:0[1-9]|1[0-2])$)")
 FIELDS = (
     'source_digest','source_name','source_mode','catalog','issues','sheets',
     'remito_entries','aliases','unmatched','is_complete','ocr_rows',
@@ -15,6 +15,7 @@ FIELDS = (
     'edit_version','remito_files','processed_signatures','ocr_signature',
     'remito_history','pending_remito_id','pop_images',
     'physical_checks','physical_events',
+    'excel_history','excel_file_digests','processed_remito_files','ocr_file_digests',
     'ocr_operation','ocr_base_entries','notes','last_updated','preliminary',
 )
 
@@ -31,6 +32,8 @@ def empty_period():
         'ocr_base_entries':{},'notes':'','last_updated':'','preliminary':False,
         'ocr_previews':[],'remito_history':[], 'pending_remito_id':None, 'pop_images':{},
         'physical_checks':{},'physical_events':[],
+        'excel_history':[],'excel_file_digests':[],
+        'processed_remito_files':[],'ocr_file_digests':[],
     }
 
 
