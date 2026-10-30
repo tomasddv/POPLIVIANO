@@ -58,8 +58,10 @@ def extract_pop_images(content: bytes, catalog: list[dict]) -> dict[str,bytes]:
         if 'xl/workbook.xml' not in names:return result
         wb=ET.fromstring(z.read('xl/workbook.xml'))
         workbook_rels=_rels(z,'xl/workbook.xml')
+        valid_sheets={sheet_name for sheet_name,_ in valid}
         for sheet in wb.findall(f'.//{{{S}}}sheet'):
             name=sheet.attrib.get('name','')
+            if name not in valid_sheets: continue
             sheet_path=workbook_rels.get(sheet.attrib.get(f'{{{R}}}id',''))
             if not sheet_path or sheet_path not in names:continue
             root=ET.fromstring(z.read(sheet_path))

@@ -13,3 +13,7 @@
 7. Nuevos remitos del mismo mes: agregar otro Excel y repetir. Los números de remito ya importados se bloquean para no duplicar totales.
 
 **Importante:** para corregir un remito que ya se cargó y consolidó, el reemplazo afecta **todas las cantidades de remitos de ese período**. Antes de reemplazar, guardá un respaldo del historial y volvé a subir todos los remitos que deban seguir vigentes.
+
+### Excel Q4 V12
+
+Si antes aparecía «no se encontraron cantidades positivas ...», actualizá el repositorio de la aplicación con **pop_core.py** y **media_core.py** de esta versión. Q4 V12 usa la fila 2 como descripción de POP y la fila 142 para la asignación de DDV. Seleccioná `Q4 2026` en *Período de carga* y subí el archivo de asignación original. Si las cargas anteriores fallaron, podés usar **Sumar Excel de entregas nuevas al consolidado**; no se aplicaron archivos fallidos. Elegí **Reemplazar la asignación consolidada del período** solamente si realmente querés descartar la asignación y los controles ya cargados. Esta operación reinicia recepciones y verificaciones físicas del período. Si ya tenés remitos controlados, guardá un respaldo JSON antes de reemplazar y revisá el impacto.

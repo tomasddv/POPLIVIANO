@@ -55,3 +55,19 @@ Subí el contenido **de este ZIP** a la raíz del repositorio de la aplicación 
 Los archivos Excel editados son la fuente controlada de la recepción. El *match* texto/POP sigue siendo aproximado y se revisa antes de aplicar. La conversión opcional imagen → borrador todavía usa OCR y **no certifica cantidades**. La aplicación muestra solo el catálogo con asignación DDV positiva; otros renglones del remito pueden permanecer en el Excel con `INCLUIR=NO` para auditoría.
 
 No se ha comprobado el despliegue en la cuenta Streamlit Cloud del usuario. Las pruebas de módulos y conciliación sí se ejecutaron en entorno local.
+
+## Compatibilidad con Q4 2026 · V12 (corrección del importador)
+
+La aplicación admite tanto el formato GS Q3 como el archivo **`Q4. Asignacion Pop Liviano V12 - Compartido con Regiones.xlsx`**, sin tener que modificar el Excel:
+
+- **Q3:** materiales en distintas filas superiores, identificadas por encabezados `CANTIDAD`.
+- **Q4 V12:** nombres de materiales en **fila 2**, asignaciones de **Distribuidora del Valle S.A. en fila 142** (columna **D**), cantidades por material a partir de la columna **E**. La fila 6 contiene totales nacionales **que NO se usan** como asignación DDV.
+- Las hojas de administración (`INICIO`, `CONTROL`, `REGLAS`, `PEGAR ASIGNACION`, `MAESTRO`) se ignoran. Se siguen leyendo las hojas ocultas con asignaciones POP reales cuando corresponda (ej. Q3).
+- Q4 incluye la hoja `SEMILIVIANOS`: el importador la conserva porque está asignada a DDV. Si querés ver únicamente POP liviano, filtrá las hojas en el Resumen y excluí esa categoría.
+- La lectura de fotografías de POP evita procesar las hojas administrativas de gran tamaño.
+
+### Validación con el Q4 V12 recibido
+
+El lector recuperó **129 columnas/referencias del catálogo**, de las que **100 tienen cantidad positiva para DDV**, por un total de **133.559 unidades**. De ellas, `SEMILIVIANOS` representa **16 referencias y 488 unidades**; el resto de las hojas suma **84 referencias y 133.071 unidades**. Se vincularon imágenes incrustadas a **95 de las 100** referencias positivas. Los totales son lectura de asignaciones, **no unidades recibidas ni conciliadas con remitos**.
+
+El total Q3 original permanece en **95.590 unidades, 73 referencias positivas**. La validación automatizada se realizó en el entorno local; es necesario desplegar en Streamlit Cloud para verificar la visualización remota.

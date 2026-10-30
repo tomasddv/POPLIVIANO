@@ -11,6 +11,7 @@ import zipfile
 
 MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 REL = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+ADMIN_SHEETS = {'INICIO', 'CONTROL', 'REGLAS', 'PEGAR ASIGNACION', 'MAESTRO'}
 DETAIL_WORDS = ('AFICHE', 'CENEFA', 'STICKER', 'COLLAR', 'COMBO', 'INTERNO', 'EXTERNO',
                 'CARTEL', 'FLEJE', 'WOBBLER', 'CENEF', 'BANNER', 'TIRAS', 'VINILO', 'BOTELLA')
 
@@ -103,6 +104,12 @@ def catalog_from_excel(content: bytes):
         for sheet in wb.findall('.//'+MAIN+'sheets/'+MAIN+'sheet'):
             name=sheet.get('name') or 'Sin nombre'
             hidden=sheet.get('state','visible')!='visible'
+            # En Q4 las hojas administrativas no contienen asignaciones POP y
+            # PEGAR ASIGNACION puede superar los 79 MB descomprimidos.
+            # Se excluyen por nombre, no por estado oculto: Q3 tiene hojas
+            # ocultas que SI contienen asignaciones reales para DDV.
+            if normalize(name) in ADMIN_SHEETS:
+                continue
             dest=mapping.get(sheet.get(REL+'id'),'')
             if not dest:
                 issues.append(f'{name}: no se encontró el archivo de hoja.');continue
@@ -118,14 +125,28 @@ def catalog_from_excel(content: bytes):
                 meta.append({'hoja':name,'oculta':hidden,'fila_ddv':None,'materiales':0,'total':0,'cabecera':None})
                 continue
             rownum, ddv = matches[0]
+            # Q4 / V12: fila 2 contiene UNA descripción por columna y la fila 6
+            # es TOTAL NACIONAL; las cantidades del proveedor están en su propia
+            # fila (ej. D142 = DISTRIBUIDORA DEL VALLE S.A.).
+            # No hay cabecera CANTIDAD ni descripción en filas 4-10.
+            q4_layout = (any('BLOQUE' in normalize(v) for v in rows.get(1,{}).values())
+                         and any('TOTAL NACIONAL' in normalize(v) for v in rows.get(6,{}).values())
+                         and len(rows.get(2,{})) >= 1)
+            if q4_layout:
+                amount_cols = sorted((col for col,val in rows[2].items()
+                      if col_index(col) >= 5 and isinstance(val,str)
+                      and normalize(val)),key=col_index)
+                header_row=2
+            else:
+                amount_cols = None
             # La mayoría de las planillas GS usan columnas de «CANTIDAD» en fila 1,
             # además de formatos en fila 4-5; no usar métricas auxiliares ni totales.
-            amount_cols=set()
-            for r in range(1, 4):
+            if amount_cols is None: amount_cols=set()
+            for r in (() if q4_layout else range(1, 4)):
                 amount_cols.update(col for col,val in rows.get(r,{}).items() if 'CANTIDAD' in normalize(val) or normalize(val)=='CANT')
             # Algunas hojas tienen una columna de formato sin el indicador CANTIDAD en fila 1.
             # Completar con encabezados explícitos que apunten a cantidades DDV.
-            for row_i in (4,5,6,7,8,9,10):
+            for row_i in (() if q4_layout else (4,5,6,7,8,9,10)):
                 for col,val in rows.get(row_i,{}).items():
                     description=normalize(val)
                     if not isinstance(val,str):continue
@@ -145,10 +166,12 @@ def catalog_from_excel(content: bytes):
                 meta.append({'hoja':name,'oculta':hidden,'fila_ddv':rownum,'materiales':0,'total':0,'cabecera':None})
                 continue
             amount_cols=sorted(amount_cols,key=col_index)
-            header_row=_choose_header(rows,amount_cols)
+            if not q4_layout:
+                header_row=_choose_header(rows,amount_cols)
             format_row=rows.get(header_row,{})
             group_row=rows.get(header_row-1,{})
-            all_grouph=[(col_index(col),val) for col,val in group_row.items() if isinstance(val,str) and normalize(val)]
+            all_grouph=([(col_index(col),val) for col,val in group_row.items()
+                         if isinstance(val,str) and normalize(val)] if not q4_layout else [])
             all_grouph.sort()
             count=0;total=0
             for col in amount_cols:
@@ -157,7 +180,7 @@ def catalog_from_excel(content: bytes):
                 if qty is None:
                     issues.append(f'{name}!{col}{rownum}: cantidad no entera o inválida ({str(raw)[:35]}), excluida.')
                     continue
-                fmt=str(format_row.get(col,'') or '').strip()
+                fmt=' '.join(str(format_row.get(col,'') or '').split())
                 prior=[(idx,txt) for idx,txt in all_grouph if idx<=col_index(col)]
                 group=str(prior[-1][1]).strip() if prior else name
                 # A veces la fila de grupo es solo una cabecera genérica
