@@ -16,7 +16,7 @@ FIELDS = (
     'remito_history','pending_remito_id','pop_images',
     'physical_checks','physical_events',
     'excel_history','excel_file_digests','processed_remito_files','ocr_file_digests',
-    'ocr_operation','ocr_base_entries','notes','last_updated','preliminary',
+    'ocr_operation','ocr_base_entries','ocr_excel_meta','remito_excel_history','notes','last_updated','preliminary',
 )
 
 
@@ -34,6 +34,7 @@ def empty_period():
         'physical_checks':{},'physical_events':[],
         'excel_history':[],'excel_file_digests':[],
         'processed_remito_files':[],'ocr_file_digests':[],
+        'ocr_excel_meta':[],'remito_excel_history':[],
     }
 
 

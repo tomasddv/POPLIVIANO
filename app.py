@@ -25,6 +25,8 @@ from physical_checks import (approve_material, undo_material, invalidate_changed
 from visual_match import visual_candidates, preferred_ocr_ids, choose_material, pending_ocr_indices
 from visual_summary import filter_visual_rows, render_visual_matrix
 from monthly_core import (MONTH_RE, scope_label, scope_sort, ingest_excels, check_new_remitos, digest_files)
+from remito_excel import parse_batch
+from convertidor_remitos import make_draft
 
 st.set_page_config(page_title='Control POP liviano · DDV', page_icon='📦',layout='wide')
 st.markdown("""<style>
@@ -159,7 +161,7 @@ def make_ocr_table(p, names):
             'Cantidad':qty,
             'Cantidad sugerida (verificar)':x.get('cantidad_sugerida'),
             'Origen cantidad':x.get('origen_cantidad',''),
-            'Descripción OCR':x.get('detalle',''),
+            'Descripción remito':x.get('detalle',''),
             'Material Excel':names.get(x.get('id',''),'(sin asignar)'),
             'Sugerencia':names.get(x.get('sugerido',''),'—'),
             'Similitud %':x.get('puntaje',0),
@@ -183,7 +185,7 @@ def confirm_ocr_rows(edited, catalog_ids):
             amounts[identity]+=n;count+=1
         else:
             unknown.append({'Página':r.get('Página',''), 'Cantidad':n,
-                'Descripción':r.get('Descripción OCR',''),
+                'Descripción':r.get('Descripción remito',''),
                 'Motivo':'Cantidad sin verificar' if n is None else 'Material sin asignar'})
     return dict(amounts),unknown,count
 
@@ -337,6 +339,33 @@ with st.sidebar:
                 persist_changes()
     st.divider()
     uploading=periods[load_period]
+    with st.expander('0 · Convertir fotografía/PDF a Excel (borrador)',expanded=False):
+        st.caption('Paso opcional, ANTES de la carga. La lectura OCR solo prepara un Excel editable: '
+                   'no ingresa cantidades en el tablero. Para imágenes de remitos distintos, '
+                   'generá un Excel por cada número de remito.')
+        input_scans=st.file_uploader('Foto o PDF de UN remito (puede tener varias páginas)',
+            type=['jpg','jpeg','png','webp','pdf'],accept_multiple_files=True,
+            key='draft_remito_scans')
+        draft_number=st.text_input('Número de remito',placeholder='00015743',key='draft_remito_number')
+        draft_date=st.date_input('Fecha del remito',key='draft_remito_date')
+        two_cols_draft=st.checkbox('El remito tiene dos columnas',value=True,key='draft_two_columns')
+        if st.button('Convertir a Excel para corregir',use_container_width=True,
+                     disabled=not input_scans or not draft_number):
+            try:
+                with st.spinner('Extrayendo renglones para crear el BORRADOR Excel…'):
+                    report=read_documents([(f.name,f.getvalue()) for f in input_scans],
+                                          two_columns=two_cols_draft,max_pages=20)
+                    payload=make_draft(report.rows,draft_number,draft_date.strftime('%Y-%m-%d'))
+                st.session_state['draft_excel_download']=(payload,draft_number)
+                st.success(f'Borrador con {len(report.rows)} filas generado. Revisalo en Excel antes de importarlo.')
+                for warning in report.warnings:st.warning(warning)
+            except Exception as exc:st.error(f'No se pudo convertir: {exc}')
+        if st.session_state.get('draft_excel_download'):
+            buffer,number=st.session_state['draft_excel_download']
+            st.download_button('⬇️ Descargar Excel BORRADOR para revisión',buffer,
+                file_name=f'Remito_{number}_BORRADOR_REVISAR.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True)
     st.markdown(f'**Carga de {load_period}**')
     if uploading['catalog']:
         assigned=sum(int(c['cantidad_excel']) for c in active_catalog(uploading['catalog']))
@@ -392,65 +421,75 @@ with st.sidebar:
             persist_changes(assets_changed=[load_period])
         except Exception as ex:
             st.error(f'No se pudieron consolidar los Excel. No se aplicó la carga: {ex}')
-    remito=st.file_uploader('2 · Subir VARIAS imágenes / PDF del mes (hasta 20 páginas por lote)',type=['png','jpg','jpeg','webp','pdf'],
-                            accept_multiple_files=True,key=f'remito_{period_key(load_period)}')
-    treatment=st.radio('Qué hacer con la nueva lectura',
-        ['Reemplazar cantidades anteriores','Agregar páginas al remito actual','Agregar un remito nuevo al período'],
-        key=f'operation_{period_key(load_period)}',
-        help='Reemplazar: reinicia los totales de recepción. Agregar páginas: suma páginas no incluidas. Agregar un remito nuevo: suma un documento adicional del trimestre.')
-    two_columns=st.checkbox('El remito tiene dos columnas',value=True,key=f'columns_{period_key(load_period)}')
-    split=st.slider('Separación de columnas (%)',42,58,50,disabled=not two_columns,key=f'split_{period_key(load_period)}')/100
-    if treatment.startswith('Agregar'):
-        st.warning('Solo agregá documentos NUEVOS. Los archivos idénticos se bloquean aunque tengan otro nombre.')
-    run_ocr=st.button('🔎 Leer remito para este período',type='primary',use_container_width=True,
-                      disabled=not remito or not uploading['catalog'])
-    if run_ocr:
+    st.divider()
+    st.markdown('### 2 · Excel de remitos revisados')
+    st.caption('Convertí cada foto/PDF a Excel, corregí las cantidades en la planilla y subí únicamente los archivos revisados. '
+               'La foto ya no se interpreta al consolidar. Los Excel de asignación se cargan en el paso 1.')
+    uploaded_receipts=st.file_uploader(
+        'Subir VARIOS Excel de remitos (uno por remito, hasta 20 por lote)',
+        type=['xlsx'],accept_multiple_files=True,key=f'remitos_xlsx_{period_key(load_period)}',
+        help='Cada archivo debe tener una pestaña REMITO con REMITO, FECHA, DESCRIPCION POP y CANTIDAD.')
+    receipt_operation=st.radio('Acción para estos remitos',[
+        'Agregar un remito nuevo al período',
+        'Reemplazar cantidades anteriores'],
+        key=f'receipt_operation_{period_key(load_period)}',
+        index=1 if uploading.get('source_mode')=='Q3 2026 precargado' and not uploading.get('remito_excel_history') else 0)
+    if uploading.get('remito_excel_history'):
+        with st.expander(f'Remitos Excel incorporados ({len(uploading["remito_excel_history"])})'):
+            st.dataframe(pd.DataFrame([
+                {'Archivo':e.get('archivo'), 'Remito':', '.join(e.get('remitos',[])),
+                 'Filas':e.get('filas',0), 'Fecha de registro':e.get('cargado','')}
+                for e in uploading['remito_excel_history']]),hide_index=True,use_container_width=True)
+    if receipt_operation.startswith('Reemplazar'):
+        st.warning('Reemplazar reinicia las cantidades recibidas del período cuando apliques esta revisión; '
+                   'no cambia las asignaciones del Excel ni los otros meses.')
+    confirm_review=st.checkbox('Confirmo que revisé los Excel contra sus remitos originales',
+                               key=f'confirm_receipts_{period_key(load_period)}')
+    if st.button('📄 Preparar conciliación desde los Excel revisados',type='primary',
+                 disabled=not uploaded_receipts or not uploading['catalog'] or not confirm_review,
+                 use_container_width=True):
         try:
-            files=[(x.name,x.getvalue()) for x in remito]
-            signature=sha256(b'|'.join(x.encode()+b':'+sha256(data).hexdigest().encode() for x,data in files)).hexdigest()
-            hashes=check_new_remitos(uploading,files) if treatment.startswith('Agregar') else digest_files(files)
-            if not treatment.startswith('Agregar') and len(set(hashes)) != len(hashes):
-                raise ValueError('Una misma imagen/PDF está duplicada dentro de esta carga.')
-            # Rechazar un lote con más de 20 páginas, sin omitir silenciosamente archivos.
-            import fitz
-            pages_count=0
-            for filename,raw in files:
-                if filename.lower().endswith('.pdf'):
-                    with fitz.open(stream=raw,filetype='pdf') as doc: pages_count += len(doc)
-                else: pages_count += 1
-            if pages_count>20:
-                raise ValueError(f'El lote contiene {pages_count} páginas; el máximo es 20. Dividilo en varias cargas.')
-            if treatment.startswith('Agregar') and signature in uploading['processed_signatures']:
-                st.error('Estas páginas ya fueron procesadas para este período. No se permite sumarlas dos veces.')
-            else:
-                with st.spinner(f'Leyendo páginas de {load_period}…'):
-                    result=read_documents(files,two_columns=two_columns,split=split,max_pages=20)
-                    suggestions=suggest_matches(result.rows,active_catalog(uploading['catalog']),uploading['aliases'])
-                    suggestions=classify_out_of_scope(suggestions,uploading['catalog'],uploading['aliases'])
-                imgs=make_scan_previews(files,max_pages=20)
-                upload_id=sha256((signature+datetime.now().isoformat()).encode()).hexdigest()[:18]
-                imgs_keys=[f'remitos/{upload_id}/pagina_{i+1:02d}.jpg' for i in range(len(imgs))]
-                assets_for_period=st.session_state.pop_assets.setdefault(load_period,{})
-                assets_for_period.update(zip(imgs_keys,imgs))
-                uploading.update(ocr_rows=suggestions,ocr_raw=result.raw_text,ocr_warnings=result.warnings,
-                    ocr_previews=result.images,ocr_edited_rows=None,ocr_edit_ver=0,
-                    ocr_version=uploading['ocr_version']+1,ocr_signature=signature,
-                    ocr_operation=treatment,ocr_base_entries=deepcopy(uploading['remito_entries']),
-                    ocr_file_digests=hashes,
-                    remito_files=[name for name,_ in files])
-                st.session_state.next_period_view=load_period
-                for event in uploading.get('remito_history',[]):
-                    if event.get('id')==uploading.get('pending_remito_id') and 'pendiente' in event.get('estado','').lower():
-                        event['estado']='Sustituido sin aplicar'
-                event_id=register_remito(uploading,signature,[n for n,_ in files],files,imgs_keys,len(suggestions))
-                for event in uploading['remito_history']:
-                    if event['id']==event_id:
-                        event['files_digests']=hashes
-                        break
-                uploading['last_updated']=now_label()
-                st.success(f'{len(suggestions)} renglones reconocidos. El remito quedó registrado; confirmá las cantidades en Lectura OCR.')
-                persist_changes(assets_changed=[load_period])
-        except Exception as ex:st.error(f'Error en el OCR: {ex}')
+            files=[(f.name,f.getvalue()) for f in uploaded_receipts]
+            replace=receipt_operation.startswith('Reemplazar')
+            old_history=[] if replace else uploading.get('remito_excel_history',[])
+            parsed,source_rows=parse_batch(files,period=load_period,existing_history=old_history)
+            signature=sha256('|'.join(f['digest'] for f in parsed).encode()).hexdigest()
+            with st.spinner('Vinculando las descripciones revisadas con los POP asignados a DDV…'):
+                suggestions=suggest_matches(source_rows,active_catalog(uploading['catalog']),uploading['aliases'])
+                suggestions=classify_out_of_scope(suggestions,uploading['catalog'],uploading['aliases'])
+            previous_id=uploading.get('pending_remito_id')
+            if previous_id:
+                for ev in uploading.get('remito_history',[]):
+                    if ev.get('id')==previous_id and 'pendiente' in ev.get('estado','').lower():
+                        ev['estado']='Reemplazado sin aplicar'
+            uploading.update(
+                ocr_rows=suggestions,ocr_raw='Importación desde Excel revisado (sin OCR automático en el tablero)',
+                ocr_warnings=[f'{sum(x["cantidad_heredada"] for x in source_rows)} cantidades por continuidad: '
+                              'confirmar que fueron revisadas en el Excel.'],
+                ocr_previews=[],ocr_edited_rows=None,ocr_edit_ver=0,
+                ocr_version=uploading['ocr_version']+1,ocr_signature=signature,
+                ocr_operation=receipt_operation,
+                ocr_base_entries={} if replace else deepcopy(uploading['remito_entries']),
+                ocr_file_digests=[f['digest'] for f in parsed],
+                remito_files=[f['nombre'] for f in parsed],
+                ocr_excel_meta=[{'archivo':x['nombre'],'digest':x['digest'],
+                                 'remitos':x['remitos'],'meses':x['meses'],'filas':len(x['filas'])}
+                                for x in parsed]
+            )
+            st.session_state.next_period_view=load_period
+            event_id=register_remito(uploading,signature,[name for name,_ in files],files,[],len(suggestions))
+            for ev in uploading['remito_history']:
+                if ev['id']==event_id:
+                    ev.update(estado='Excel pendiente de revisión',tipo='Excel revisado',
+                              remitos=sorted({n for x in parsed for n in x['remitos']}),
+                              files_digests=[x['digest'] for x in parsed])
+                    break
+            uploading['last_updated']=now_label()
+            st.success(f'{len(files)} Excel de remitos preparados · {len(source_rows)} filas. '
+                       'Verificá los vínculos «Material Excel» y pulsá «Aplicar revisión».')
+            persist_changes()
+        except Exception as ex:
+            st.error(f'No se pudieron importar los remitos Excel: {ex}')
     st.divider()
     st.markdown('**Historial de períodos**')
     history=[]
@@ -515,26 +554,26 @@ if summary['verificados_fisicos']:
                'La lectura original se mantiene intacta para auditoría.')
 if p['preliminary']:
     if p['source_mode']=='Q3 2026 precargado':
-        st.warning('**Q3 precargado · cifras provisionales:** la transcripción anterior de la foto no fue certificada. Podés reemplazarla subiendo nuevas fotos en «Período de carga: Q3 2026».')
+        st.warning('**Q3 precargado · cifras provisionales:** la transcripción anterior de la foto no fue certificada. Podés reemplazarla subiendo un Excel de remito revisado en «Período de carga: Q3 2026».')
     else:
         st.warning('**Control preliminar:** las cantidades fueron cargadas, pero falta confirmar la revisión completa del remito.')
 if p['ocr_rows'] and p['ocr_signature'] not in p['processed_signatures']:
-    st.info('Hay una lectura OCR nueva **pendiente de revisión y aplicación** para este período; las cifras de arriba todavía corresponden al control anterior.')
+    st.info('Hay una carga de Excel de remitos **pendiente de revisión y aplicación** para este período; las cifras de arriba todavía corresponden al control anterior.')
 if p['is_complete']:
     st.success('Remito marcado como completamente revisado; los materiales sin registro pasan a contabilizarse como faltantes.')
 elif p['remito_entries']:
     st.caption('Conciliación preliminar: un material no leído aparece pendiente, no como recibido en cero.')
 else:
-    st.info('Faltan cantidades del remito. Seleccioná este período para cargar sus fotos o PDF.')
+    st.info('Faltan cantidades del remito. Seleccioná este período para cargar el Excel de remito revisado.')
 if p['unmatched']:
-    st.error(f'Hay {len(p["unmatched"])} líneas OCR no conciliadas. Revisalas antes de cerrar el remito.')
+    st.error(f'Hay {len(p["unmatched"])} líneas de remito no conciliadas. Revisalas antes de cerrar el remito.')
 
 names=labels_for(catalog,p['aliases'])
 valid_ids=set(names)
 options=['(sin asignar)']+list(names.values())
 
 page_summary,page_ocr,page_items,page_gallery,page_history,page_labels,page_export=st.tabs([
-    '📊 Resumen','📷 Lectura OCR','🧾 Control por material',
+    '📊 Resumen','📄 Revisión Excel de remitos','🧾 Control por material',
     '🖼️ Galería de POP','📑 Remitos registrados','🏷️ Nombres de materiales','📥 Exportar / auditar'])
 
 with page_summary:
@@ -542,7 +581,7 @@ with page_summary:
     st.subheader(f'Planilla visual de POP · {scope_label(view_period)}')
     if MONTH_RE.fullmatch(view_period):
         st.caption(f'Consolidado mensual: {len(p.get("excel_history",[]))} Excel registrados · '
-                   f'{len([e for e in p.get("remito_history",[]) if e.get("estado","").startswith("OCR aplicado")])} lotes de remitos aplicados. '
+                   f'{len([e for e in p.get("remito_history",[]) if e.get("estado","").startswith(("OCR aplicado","Excel aplicado"))])} lotes de remitos aplicados. '
                    'Los totales se suman únicamente dentro de este mes.')
     st.caption('Solo POP asignados con unidades a DDV: foto arriba y cantidades debajo. '
                'La diferencia y el estado reflejan las tildes de verificación física de la galería. '
@@ -632,15 +671,15 @@ with page_summary:
             st.dataframe(pd.DataFrame(compare),hide_index=True,use_container_width=True)
 
 with page_ocr:
-    st.subheader(f'Leer y revisar fotos · {view_period}')
-    st.caption('El nombre se compara por alias, marca y medida. Las filas sin cifra heredan el último valor expreso en la misma columna/página, marcado para revisión. Las cantidades no se modifican para forzar coincidencias.')
+    st.subheader(f'Revisar coincidencias de Excel de remitos · {view_period}')
+    st.caption('Las cantidades vienen de los Excel de remitos ya revisados. El sistema solo sugiere la correspondencia con el Excel de asignación DDV; no modifica cantidades para forzar coincidencias.')
     for warning in p['ocr_warnings']:st.warning(warning)
     if not p['ocr_rows']:
-        st.info('Este período no tiene una extracción OCR editable. Podés subir una imagen nueva y ejecutar «Leer remito para este período».')
+        st.info('Todavía no hay un Excel de remito para revisar. Elegí este período en «Período de carga» y subí uno o más archivos .xlsx.')
     else:
         ocr=p['ocr_rows']
         q1,q2,q3=st.columns(3)
-        q1.metric('Renglones OCR',len(ocr));q2.metric('Con cantidad',sum(x.get('cantidad') is not None for x in ocr))
+        q1.metric('Renglones de remito',len(ocr));q2.metric('Con cantidad',sum(x.get('cantidad') is not None for x in ocr))
         q3.metric('Con material sugerido',sum(bool(x.get('sugerido')) for x in ocr))
         outside=[x for x in ocr if x.get('fuera_ddv')]
         if outside:
@@ -648,9 +687,9 @@ with page_ocr:
             with st.expander('Ver detalle de material fuera de asignación DDV'):
                 st.dataframe(pd.DataFrame([{'Remito':x.get('detalle'),'Cantidad':x.get('cantidad'),
                     'Motivo':x.get('razon_fuera_ddv')} for x in outside]),hide_index=True,use_container_width=True)
-        st.info('**Cantidad por continuidad:** si una línea no tiene número, usa el último valor expreso de su columna/página y lo marca como heredado. Revisá **Origen cantidad** antes de aplicar. Las medidas y marcas se reconocen con alias (por ejemplo, Andes/AO).')
+        st.info('**Cantidad por continuidad:** el Excel indica qué cifras se heredaron. Verificá **Origen cantidad** y comprobá la correspondencia de materiales antes de confirmar.')
         st.caption(f'Acción seleccionada para esta lectura: **{p["ocr_operation"]}**. Reaplicar la misma tabla no suma dos veces los materiales.')
-        st.markdown('**Revisá la foto**: verificá primero las cantidades **heredadas**, corregí la columna **Cantidad** y verificá **Material Excel**. Si no reconocés el material por el nombre, usá **🖼️ Elegir material por su foto**, debajo de la tabla: podés buscar, mirar miniaturas y pulsar **Seleccionar POP**.')
+        st.markdown('**Revisá las propuestas de coincidencia.** La cantidad procede del Excel que ya controlaste. Si el POP elegido no es correcto, elegí otro en **Material Excel** o utilizá las fotografías del selector visual.')
         # Edición en vivo: guarda el borrador en la sesión, sin aplicar al remito
         # hasta confirmar. Esto permite seleccionar imágenes SIN perder correcciones
         # realizadas en la misma tabla.
@@ -664,7 +703,7 @@ with page_ocr:
         edited=st.data_editor(pd.DataFrame(st.session_state[draft_key]),
             use_container_width=True,hide_index=True,key=editor_key,
             height=525,num_rows='dynamic',
-            column_order=['Página','Cantidad','Origen cantidad','Cantidad sugerida (verificar)','Descripción OCR',
+            column_order=['Página','Cantidad','Origen cantidad','Cantidad sugerida (verificar)','Descripción remito',
                           'Material Excel','Sugerencia','Similitud %','Excel sugerido','Diferencia tentativa','Alertas del match','Otras opciones','Lectura','Ignorar'],
             column_config={
                 'Origen cantidad':st.column_config.TextColumn('Origen cantidad',
@@ -677,7 +716,7 @@ with page_ocr:
                    help='Puntaje aproximado de similitud de descripción, no de cantidad ni de recepción.'),
                 'Excel sugerido':st.column_config.NumberColumn('Excel sugerido',format='%d'),
                 'Diferencia tentativa':st.column_config.NumberColumn('Diferencia tentativa',format='%d'),
-                'Descripción OCR':st.column_config.TextColumn('Descripción OCR',width='large'),
+                'Descripción remito':st.column_config.TextColumn('Descripción remito',width='large'),
                 'Material Excel':st.column_config.SelectboxColumn('Material Excel',options=options,width='large'),
                 'Sugerencia':st.column_config.TextColumn('Sugerencia',width='large'),
                 'Página':st.column_config.TextColumn('Página',width='medium'),
@@ -701,11 +740,11 @@ with page_ocr:
                     current_row=st.selectbox(
                         '1 · Elegí solo una fila SIN ASIGNAR del remito',
                         pending_rows,
-                        format_func=lambda i: f"Fila {i+1} · {str(draft[i].get('Descripción OCR') or 'Sin descripción')[:75]} · "
+                        format_func=lambda i: f"Fila {i+1} · {str(draft[i].get('Descripción remito') or 'Sin descripción')[:75]} · "
                                               f"Cantidad: {draft[i].get('Cantidad') if integer_quantity(draft[i].get('Cantidad')) is not None else 'sin verificar'}",
                         key=f'visual_ocr_row_{period_key(view_period)}_{p["ocr_version"]}_{p["ocr_edit_ver"]}_{pending_signature}')
                     selected_ocr=draft[current_row]
-                    st.caption('OCR detectó: '+str(selected_ocr.get('Descripción OCR') or 'Sin descripción')+
+                    st.caption('Excel del remito: '+str(selected_ocr.get('Descripción remito') or 'Sin descripción')+
                                ' · Material elegido: '+str(selected_ocr.get('Material Excel') or '(sin asignar)'))
                     filter1,filter2,filter3=st.columns([3,2,1.2])
                     search_query=filter1.text_input('2 · Buscar material por nombre o tamaño',placeholder='Ej.: afiche 20x30, Brahma, Stella',
@@ -721,7 +760,7 @@ with page_ocr:
                     candidates=visual_candidates(catalog,p['aliases'],search_query,filter_sheet,
                         preferred,photos_only,image_map,image_assets)
                     st.caption(f'3 · Tocá **Seleccionar POP** debajo de su imagen. '
-                               f'Hay {len(candidates)} materiales disponibles; se muestran primero los sugeridos por el OCR.')
+                               f'Hay {len(candidates)} materiales disponibles; se muestran primero los sugeridos por similitud de nombres.')
                     if candidates:
                         per_page=12
                         page_total=max(1,math.ceil(len(candidates)/per_page))
@@ -742,7 +781,7 @@ with page_ocr:
                                         else:st.caption('🖼️ Este POP no tiene foto vinculada')
                                         st.markdown('**'+str(p['aliases'].get(cid) or c['formato'])+'**')
                                         st.caption(f"{c['hoja']} · {cid} · Excel DDV: {pretty(c['cantidad_excel'])}")
-                                        if cid in preferred:st.caption('⭐ Material sugerido por OCR')
+                                        if cid in preferred:st.caption('⭐ Material sugerido por nombre')
                                         if is_selected:st.success('✓ Seleccionado para esta fila')
                                         if st.button('✓ Seleccionar POP',key=f'visual_pick_{period_key(view_period)}_{p["ocr_version"]}_{current_row}_{sha256(cid.encode()).hexdigest()[:12]}',
                                                      use_container_width=True,disabled=is_selected):
@@ -755,7 +794,7 @@ with page_ocr:
                 else:
                     st.success('✅ No quedan renglones sin asignar. Todos los POP identificados se mantienen en la tabla de revisión.')
             else:
-                st.warning('No hay filas OCR para seleccionar.')
+                st.warning('No hay filas del remito para seleccionar.')
         submitted=st.button('✅ Aplicar revisión a este período',type='primary',use_container_width=True,
                             help='Confirma las cantidades y las selecciones visuales para este período.')
         if submitted:
@@ -764,7 +803,7 @@ with page_ocr:
             p['ocr_edited_rows']=edited_rows
             p['ocr_edit_ver']+=1
             updated=merge_quantities(p['ocr_base_entries'],quantities,p['ocr_operation'])
-            invalidate_changed_checks(p,p['remito_entries'],updated,'Nueva lectura OCR aplicada')
+            invalidate_changed_checks(p,p['remito_entries'],updated,'Importación Excel revisado aplicada')
             p['remito_entries']=updated
             p['unmatched']=unknown
             p['is_complete']=False
@@ -781,11 +820,19 @@ with page_ocr:
             else:
                 p['processed_remito_files']=list(p.get('ocr_file_digests') or [])
             p['last_updated']=now_label()
+            if p.get('ocr_excel_meta'):
+                if p['ocr_operation'].startswith('Reemplazar'):
+                    p['remito_excel_history']=[]
+                stored={e.get('digest') for e in p.get('remito_excel_history',[])}
+                for meta in p['ocr_excel_meta']:
+                    if meta['digest'] not in stored:
+                        p.setdefault('remito_excel_history',[]).append({**meta,'cargado':now_label()})
+                        stored.add(meta['digest'])
             for event in reversed(p.get('remito_history',[])):
                 if event['id']==p.get('pending_remito_id'):
-                    event.update(estado='OCR aplicado · revisión pendiente',filas_aplicadas=count,sin_conciliar=len(unknown))
+                    event.update(estado='Excel aplicado · revisión pendiente',filas_aplicadas=count,sin_conciliar=len(unknown))
                     break
-            st.toast(f'{count} líneas aplicadas a {view_period}. Pendientes: {len(unknown)}.')
+            st.toast(f'{count} líneas del Excel aplicadas a {view_period}. Pendientes: {len(unknown)}.')
             persist_changes()
         if p['unmatched']:
             st.markdown('**Renglones sin conciliar**')
@@ -794,13 +841,13 @@ with page_ocr:
             with st.expander('Ver fotografías originales de este lote',expanded=False):
                 for label,img in p['ocr_previews']:
                     st.image(img,caption=label,width=650)
-        with st.expander('Transcripción completa del OCR'):
+        with st.expander('Fuente de las cantidades y notas de importación'):
             st.text_area('Texto detectado',value=p['ocr_raw'],height=280)
-            st.download_button('Descargar texto OCR',p['ocr_raw'].encode(),file_name=f'POP_DDV_{period_key(view_period)}_ocr.txt')
+            st.download_button('Descargar notas de la lectura',p['ocr_raw'].encode(),file_name=f'POP_DDV_{period_key(view_period)}_notas.txt')
 
 with page_items:
     st.subheader(f'Control editable por material · {view_period}')
-    st.caption('Remito original: cifra OCR/manual, sin modificaciones por tildes físicas. Conciliado: cantidad ajustada tras control presencial. Blanco significa no leído; 0 significa comprobado.')
+    st.caption('Remito original: cantidad del Excel revisado, sin modificaciones por tildes físicas. Conciliado: cantidad ajustada tras control presencial. Blanco significa no leído; 0 significa comprobado.')
     col1,col2,col3=st.columns([2,2,1])
     sheet=col1.selectbox('Hoja del Excel',['Todas']+sorted(set(r['hoja'] for r in rows)),key=f'filter_sheet_{period_key(view_period)}')
     status=col2.selectbox('Estado',['Todos','Diferencias y pendientes','Coincide','Faltante','Sobrante','Pendiente','Sin movimiento'],key=f'filter_status_{period_key(view_period)}')
@@ -838,7 +885,7 @@ with page_items:
     st.divider()
     blocked=bool(p['unmatched']) or not p['remito_entries']
     if not p['is_complete']:
-        st.caption('Para cerrar el remito debe haber cantidades registradas, no quedar renglones OCR sin resolver y haberse revisado físicamente TODAS sus páginas.')
+        st.caption('Para cerrar el control debe haber cantidades registradas, no quedar renglones sin vincular y haberse revisado todos los Excel del remito.')
         if st.button('✅ Marcar remito completamente revisado',disabled=blocked,key=f'finish_{period_key(view_period)}'):
             p['is_complete']=True;p['preliminary']=False;p['last_updated']=now_label()
             for event in reversed(p.get('remito_history',[])):
@@ -965,7 +1012,7 @@ with page_history:
         st.dataframe(pd.DataFrame([{
             'Fecha':e.get('fecha',''), 'Operación':e.get('accion',''),
             'Archivos':', '.join(e.get('archivos',[])),
-            'Páginas':e.get('paginas',0),'Renglones OCR':e.get('filas_ocr',0),
+            'Páginas':e.get('paginas',0),'Renglones':e.get('filas_ocr',0),
             'Aplicados':e.get('filas_aplicadas',0),'Estado':e.get('estado','')}
             for e in reversed(events)]),use_container_width=True,hide_index=True)
         scans=st.session_state.pop_assets.get(view_period,{})
@@ -1018,4 +1065,4 @@ with page_export:
         file_name=f'POP_DDV_{period_key(view_period)}_imagenes.zip',mime='application/zip')
 
 st.divider()
-st.caption('POP liviano · DDV · Cada mes y trimestre histórico es independiente. OCR y cantidades heredadas requieren revisión antes de certificar recepción.')
+st.caption('POP liviano · DDV · Los Excel revisados son la base de recepción; las verificaciones físicas se guardan por período.')
